@@ -1,0 +1,43 @@
+# Python / uv
+.venv/
+.uv-cache/
+.uv-python/
+.uv-python-cache/
+.uv-python/.temp/
+.pip-cache/
+.pyinstaller-cache/
+.pycache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest-tmp/
+pytest-cache-files-*/
+
+# EasyPaper runtime data (config contains a local API key)
+config.json
+config.json.bad
+*.log
+cache/
+logs/
+exports/
+.tmp/
+.webengine/
+.easypaper-runtime/
+.cache/
+
+# Build artifacts (rebuild with scripts\build.ps1)
+_build/
+build/
+build-debug/
+dist/
+_internal/
+EasyPaper.exe
+EasyPaperDebug.exe
+
+# Local model weights are intentionally kept out of source control.
+paddle_ocr/model.safetensors
+paddle_ocr/*.safetensors
+.paddle-cache/
+.hf-cache/
+.torch-cache/
+.mpl-cache/

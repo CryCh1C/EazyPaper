@@ -1,0 +1,40 @@
+[project]
+name = "easypaper"
+version = "1.0.0"
+description = "Lightweight local PDF reading, translation and Q&A desktop app"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = { text = "MIT" }
+authors = [{ name = "EasyPaper" }]
+dependencies = [
+    "PySide6-Essentials==6.12.0",
+    "PySide6-WebEngine==6.12.0.140",
+    "PyMuPDF==1.26.7",
+    "openai==3.37.0",
+    "Pillow==13.0.0",
+]
+
+[project.optional-dependencies]
+ocr = [
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+    "transformers==5.20.2",
+    "accelerate==1.15.0",
+    "safetensors==0.8.0",
+]
+dev = [
+    "pytest>=9.0",
+    "pytest-qt>=4.5",
+    "PyInstaller==6.22.3",
+]
+
+[tool.uv]
+package = false
+# All uv caches stay inside this project.  UV_PYTHON_INSTALL_DIR is set by
+# scripts/build.ps1 so managed interpreters also stay here.
+cache-dir = ".uv-cache"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider --basetemp=.tmp/ptest"
+qt_api = "pyside6"

@@ -1,0 +1,11 @@
+# Optional local OCR runtime.  The GUI exe deliberately does NOT bundle these
+# heavy wheels; it launches this same .venv in a separate process.
+# PaddleOCR-VL-1.6 local weights are loaded through transformers.
+torch==2.14.1
+torchvision==0.29.1
+transformers==5.20.2
+accelerate==1.15.0
+safetensors==0.8.0
+# Page rendering / image preprocessing for the standalone worker.
+PyMuPDF==1.26.7
+Pillow==13.0.0
