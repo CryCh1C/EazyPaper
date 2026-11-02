@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "",
+    "model": "deepseek-flash",
+    "timeout": 120,
+    "temperature": 0.2,
+    "max_tokens": 5000,
+    "use_json_mode": true
+  },
+  "translation": {
+    "target_language": "简体中文",
+    "chunk_chars": 3600,
+    "max_workers": 3,
+    "skip_references": true,
+    "review_pass": true,
+    "reasoning_effort": "minimal",
+    "prompt_version": "translate-v3"
+  },
+  "chat": {
+    "context_chars": 90000,
+    "history_turns": 4,
+    "temperature": 0.3,
+    "max_tokens": 3500,
+    "reasoning_effort": "auto"
+  },
+  "ocr": {
+    "enabled": true,
+    "mode": "auto",
+    "backend": "oxr",
+    "model_dir": "oxr",
+    "python_path": "",
+    "device": "cuda",
+    "dpi": 160,
+    "max_pixels": 1048576,
+    "max_new_tokens": 1536,
+    "batch_size": 1,
+    "prewarm": true,
+    "inline_latex": true,
+    "inline_formula_limit": 25,
+    "timeout_seconds": 3600,
+    "force_refresh": false
+  },
+  "ui": {
+    "left_zoom": 1.0,
+    "middle_zoom": 1.0,
+    "right_zoom": 1.0,
+    "window_width": 1600,
+    "window_height": 980,
+    "appearance": "system",
+    "color_theme": "teal",
+    "splitter_sizes": [
+      780,
+      820
+    ]
+  }
+}

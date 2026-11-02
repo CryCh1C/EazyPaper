@@ -38,7 +38,7 @@ LOG_DIR = HOME / "logs"
 EXPORT_DIR = HOME / "exports"
 IMPORT_DIR = HOME / "imports"
 TMP_DIR = HOME / ".tmp"
-MODEL_DIR = HOME / "paddle_ocr"
+MODEL_DIR = HOME / "oxr"
 RUNTIME_DIR = HOME / ".easypaper-runtime"
 OCR_RUNTIME_DIR = HOME / "ocr-runtime"
 
@@ -100,9 +100,9 @@ def model_candidates() -> list[Path]:
 
     candidates = [
         MODEL_DIR,
+        HOME / "models" / "oxr",
         HOME / "models" / "paddle_ocr",
-        HOME / "paddleocr",
-        Path.cwd() / "paddle_ocr",
+        Path.cwd() / "oxr",
     ]
     unique: list[Path] = []
     for item in candidates:
@@ -119,7 +119,7 @@ def default_model_dir() -> str:
                 return str(candidate.relative_to(HOME))
             except ValueError:
                 return str(candidate)
-    return "paddle_ocr"
+    return "oxr"
 
 
 def find_ocr_python(explicit: str = "") -> Path | None:

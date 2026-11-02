@@ -54,6 +54,13 @@ p { margin:6px 0 9px 0; line-height:1.75; }
 .source-note { color:#A79D8D; font-size:8pt; }
 .toc-note { background:#F8F6F1; border:1px solid #E8E2D7; border-radius:8px; padding:8px 10px;
             color:#6F746F; font-size:9pt; margin:8px 0 14px 0; }
+.page-columns { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:22px;
+                 align-items:start; margin:0 0 14px 0; }
+.page-column { min-width:0; }
+.page-full { grid-column:1 / -1; min-width:0; }
+#camera-shell { position:relative; width:100%; min-height:1px; }
+#camera { width:100%; transform-origin:0 0; will-change:transform; }
+@media (max-width:600px) { .page-columns { grid-template-columns:minmax(0,1fr); } }
 """
 
 _DARK_CSS = """
@@ -83,7 +90,15 @@ def escape(text: str) -> str:
     return html.escape(str(text or ""), quote=False)
 
 
-def inline(text: str) -> str:
+def inline(text: str, block: Block | None = None) -> str:
+    if block is not None:
+        mapping = block.meta.get("inline_math")
+        if isinstance(mapping, list):
+            for item in mapping:
+                placeholder = str(item.get("placeholder") or "")
+                latex = str(item.get("latex") or "").strip()
+                if placeholder and latex:
+                    text = str(text).replace(placeholder, f"${latex}$")
     value = escape(text)
     value = re.sub(
         r"`([^`\n]+)`",
@@ -277,20 +292,20 @@ def render_block(
             f"{escape(source)}</div>"
         )
     if block.kind == "title":
-        return f"<h1>{inline(translated or source)}</h1>"
+        return f"<h1>{inline(translated or source, block)}</h1>"
     if block.kind == "heading":
         tag = "h2" if block.level <= 1 else "h3"
-        return f"<{tag}>{inline(translated or source)}</{tag}>"
+        return f"<{tag}>{inline(translated or source, block)}</{tag}>"
     if block.kind == "caption":
         value = translated or source
-        return f'<p class="caption"><span class="block-label">{label}</span>{inline(value)}</p>'
+        return f'<p class="caption"><span class="block-label">{label}</span>{inline(value, block)}</p>'
     if block.kind == "reference":
-        return f'<p class="reference">{inline(source)}</p>'
+        return f'<p class="reference">{inline(source, block)}</p>'
     if not translated:
         if status == "running":
-            return f'<p class="translating">{inline(source)}</p>'
-        return f'<p class="untranslated">{inline(source)}</p>'
-    return f'<p class="paragraph">{inline(translated)}</p>'
+            return f'<p class="translating">{inline(source, block)}</p>'
+        return f'<p class="untranslated">{inline(source, block)}</p>'
+    return f'<p class="paragraph">{inline(translated, block)}</p>'
 
 
 def _block_html(
@@ -328,9 +343,36 @@ def _render_page(
     if not blocks:
         out.append("</div>")
         return "".join(out)
+    two_column = any(int(b.meta.get("columns", 1) or 1) > 1 for b in blocks)
+    if not two_column:
+        for block in blocks:
+            out.append(_block_html(block, document, status, asset_base, zoom))
+        out.append("</div>")
+        return "".join(out)
+
+    out.append('<div class="page-columns columns-2">')
+    current_column: int | None = None
     for block in blocks:
+        column = int(block.meta.get("column", 0) or 0)
+        if column == 0:
+            if current_column is not None:
+                out.append("</div>")
+                current_column = None
+            out.append(
+                '<div class="page-full">'
+                + _block_html(block, document, status, asset_base, zoom)
+                + "</div>"
+            )
+            continue
+        if column != current_column:
+            if current_column is not None:
+                out.append("</div>")
+            out.append('<div class="page-column">')
+            current_column = column
         out.append(_block_html(block, document, status, asset_base, zoom))
-    out.append("</div>")
+    if current_column is not None:
+        out.append("</div>")
+    out.append("</div></div>")
     return "".join(out)
 
 
@@ -343,8 +385,9 @@ def render_document(
     zoom: float = 1.0,
     dark: bool | None = None,
 ) -> str:
-    if dark is None:
-        dark = theme_module.is_dark()
+    # The translation reading surface is intentionally always light; the
+    # surrounding application chrome can still follow the dark theme.
+    dark = False
     if document is None:
         return _empty_state(
             "打开一篇 PDF",
@@ -367,6 +410,7 @@ def render_document(
         katex_links,
         f"<style>{_CSS}{_DARK_CSS if dark else ''}{_scaled_css(zoom)}</style>",
         f"</head><body class=\"{'dark' if dark else ''}\">",
+        '<div id="camera-shell"><div id="camera">',
         '<a name="top"></a>',
         f"<h1>{inline(document.title or document.file_name)}</h1>",
     ]
@@ -390,6 +434,7 @@ def render_document(
         parts.append(_render_page(page, document, status, asset_base, zoom))
     if not visible:
         parts.append('<div class="toc-note">未提取到可显示的文本。若为扫描版 PDF，请配置本地 OCR 后重新解析。</div>')
+    parts.append("</div></div>")
     if katex_css.is_file() and katex_js.is_file() and auto_js.is_file():
         parts.extend(
             [
@@ -408,7 +453,12 @@ _MATH_AND_ZOOM_JS = r"""
   let currentZoom = 1.0;
   let zoomTarget = 1.0;
   let zoomRaf = 0;
+  let baseWidth = 0;
   const ZMIN = 0.5, ZMAX = 2.5;
+
+  function cameraEls() {
+    return [document.getElementById("camera"), document.getElementById("camera-shell")];
+  }
 
   function topBlock() {
     let best = "", bestTop = -1e9;
@@ -450,13 +500,35 @@ _MATH_AND_ZOOM_JS = r"""
     }
   }
 
+  function ensureBaseWidth() {
+    const [camera, shell] = cameraEls();
+    if (!camera || !shell) return;
+    if (!baseWidth) {
+      const width = camera.offsetWidth || camera.getBoundingClientRect().width;
+      baseWidth = Math.max(320, width);
+      camera.style.width = baseWidth + "px";
+    }
+  }
+
+  function applyCamera(zoom) {
+    const [camera, shell] = cameraEls();
+    if (!camera || !shell) return;
+    ensureBaseWidth();
+    camera.style.transform = "scale(" + zoom + ")";
+    shell.style.width = (baseWidth * zoom) + "px";
+    shell.style.height = (camera.scrollHeight * zoom) + "px";
+    shell.style.marginLeft = zoom < 1
+      ? Math.max(0, (baseWidth - baseWidth * zoom) / 2) + "px"
+      : "0px";
+  }
+
   function setZoom(value, notify) {
     const anchor = topBlock();
     currentZoom = Math.max(ZMIN, Math.min(ZMAX, value));
     zoomTarget = currentZoom;
-    document.body.style.zoom = String(currentZoom);
+    applyCamera(currentZoom);
     requestAnimationFrame(function () {
-      scrollToBlock(anchor);
+      if (anchor) scrollToBlock(anchor);
       if (notify) document.title = "EASYPAPER_ZOOM:" + Math.round(currentZoom * 100);
     });
   }
@@ -474,6 +546,8 @@ _MATH_AND_ZOOM_JS = r"""
   window.__setZoom = function (value) { setZoom(value, true); };
   window.__afterLoad = function (anchor) {
     renderMath();
+    ensureBaseWidth();
+    applyCamera(currentZoom);
     if (anchor) setTimeout(function () { scrollToBlock(anchor); }, 40);
     document.title = "EASYPAPER_ZOOM:" + Math.round(currentZoom * 100);
   };

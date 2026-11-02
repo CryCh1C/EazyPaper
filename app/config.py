@@ -28,9 +28,9 @@ REASONING_LABELS = {value: label for label, value in REASONING_OPTIONS}
 
 @dataclass
 class LLMConfig:
-    base_url: str = "https://api.openai.com/v1"
+    base_url: str = "https://api.deepseek.com"
     api_key: str = ""
-    model: str = "gpt-4o-mini"
+    model: str = "deepseek-flash"
     timeout: int = 120
     temperature: float = 0.2
     max_tokens: int = 5000
@@ -61,14 +61,17 @@ class ChatConfig:
 class OcrConfig:
     enabled: bool = True
     mode: str = "auto"  # auto | always | off
+    backend: str = "oxr"
     model_dir: str = field(default_factory=default_model_dir)
     python_path: str = ""
-    device: str = "auto"  # auto | cpu | cuda
+    device: str = "cuda"  # cuda | cpu
     dpi: int = 160
-    max_pixels: int = 800000
-    max_new_tokens: int = 1536
-    batch_size: int = 2
+    max_pixels: int = 1024 * 1024
+    max_new_tokens: int = 2048
+    batch_size: int = 1
     prewarm: bool = True
+    inline_latex: bool = True
+    inline_formula_limit: int = 6
     timeout_seconds: int = 3600
     force_refresh: bool = False
 
@@ -82,7 +85,7 @@ class UIConfig:
     window_height: int = 980
     appearance: str = "system"  # system | light | dark
     color_theme: str = "teal"  # teal | blue | red | violet | amber
-    splitter_sizes: list[int] = field(default_factory=lambda: [590, 600, 410])
+    splitter_sizes: list[int] = field(default_factory=lambda: [780, 820])
 
 
 @dataclass
@@ -182,11 +185,15 @@ class AppConfig:
             self.chat.reasoning_effort = "auto"
 
         self.ocr.mode = self.ocr.mode if self.ocr.mode in {"auto", "always", "off"} else "auto"
-        self.ocr.device = self.ocr.device if self.ocr.device in {"auto", "cpu", "cuda"} else "auto"
+        self.ocr.backend = self.ocr.backend if self.ocr.backend in {"oxr"} else "oxr"
+        self.ocr.device = self.ocr.device if self.ocr.device in {"cpu", "cuda", "auto"} else "cuda"
+        if self.ocr.device == "auto":
+            self.ocr.device = "cuda"
         self.ocr.dpi = max(96, min(self.ocr.dpi, 300))
         self.ocr.max_pixels = max(200000, min(self.ocr.max_pixels, 4000000))
         self.ocr.max_new_tokens = max(128, min(self.ocr.max_new_tokens, 8192))
         self.ocr.batch_size = max(1, min(self.ocr.batch_size, 4))
+        self.ocr.inline_formula_limit = max(0, min(self.ocr.inline_formula_limit, 200))
         self.ocr.timeout_seconds = max(60, min(self.ocr.timeout_seconds, 14400))
         if not self.ocr.model_dir.strip():
             self.ocr.model_dir = default_model_dir()
@@ -200,8 +207,8 @@ class AppConfig:
             self.ui.appearance = "system"
         if self.ui.color_theme not in {"teal", "blue", "red", "violet", "amber"}:
             self.ui.color_theme = "teal"
-        if len(self.ui.splitter_sizes) != 3 or sum(self.ui.splitter_sizes) <= 0:
-            self.ui.splitter_sizes = [590, 600, 410]
+        if len(self.ui.splitter_sizes) != 2 or sum(self.ui.splitter_sizes) <= 0:
+            self.ui.splitter_sizes = [780, 820]
 
     def apply_env(self) -> None:
         """Environment overrides are handy for CI and packaging tests."""

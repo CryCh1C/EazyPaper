@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller one-file build for EasyPaper.
 
-The GUI executable deliberately excludes torch / transformers / PaddlePaddle.
-The local PaddleOCR-VL worker is launched from .venv (or ocr-runtime) as a
-separate process, keeping the executable small and the interface responsive.
+The GUI keeps the OXR runtime external.  Only the small JSON client and the
+worker script are shipped; Python 3.12 + torch + transformers live in the
+external .venv / ocr-runtime.  The OXR checkpoint remains external under .\oxr.
 """
 
 import os
@@ -18,7 +18,7 @@ datas = [
     (str(project_root / "app" / "resources" / "easypaper.ico"), "app/resources"),
     (str(project_root / "app" / "resources" / "easypaper.png"), "app/resources"),
     (str(project_root / "app" / "resources" / "katex"), "app/resources/katex"),
-    (str(project_root / "tools" / "ocr_worker.py"), "tools"),
+    (str(project_root / "tools" / "oxr_worker.py"), "tools"),
 ]
 
 hiddenimports = [
@@ -45,10 +45,11 @@ hiddenimports = [
     "PySide6.QtQuick",
     "app.translation_package",
     "app.project_package",
+    "app.ocr",
 ]
 
 excludes = [
-    # OCR runtime is a sidecar process, never imported by the GUI.
+    # OXR runtime is external; these must never enter _internal.
     "torch",
     "torchvision",
     "transformers",
@@ -57,17 +58,17 @@ excludes = [
     "safetensors",
     "huggingface_hub",
     "hf_xet",
+    "numpy",
+    "PIL",
     "sympy",
     "tqdm",
+    # Legacy OCR runtimes are not used by the OXR adapter.
     "paddle",
     "paddleocr",
     "paddlex",
     "onnxruntime",
-    "networkx",
     "pymupdf4llm",
     "pymupdf_layout",
-    "numpy",
-    "PIL",
     # Unused UI/runtime modules.
     "PySide6.Qt3DCore",
     "PySide6.Qt3DRender",

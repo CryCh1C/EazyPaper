@@ -33,7 +33,7 @@ from ..models import (
 
 log = get_logger("pdf.extractor")
 
-EXTRACTOR_VERSION = 4
+EXTRACTOR_VERSION = 5
 
 ProgressFn = Callable[[str, int, int, str], None]
 
@@ -144,6 +144,7 @@ def extract_document(
                 block.id = f"p{page.number}_b{order}"
                 block.order = order
             page.words = _order_words(page.words, page.blocks)
+        _assign_columns(raw_pages)
 
         _mark_references(raw_pages)
         if asset_dir is not None:
@@ -314,6 +315,7 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
         bold_chars = 0
         total_chars = 0
         font_names: Counter[str] = Counter()
+        span_meta: list[dict[str, object]] = []
         for line in raw_block.get("lines", []):
             spans = line.get("spans", [])
             if not spans:
@@ -330,7 +332,17 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
                 total_chars += count
                 if int(span.get("flags", 0)) & 16:
                     bold_chars += count
-                font_names[str(span.get("font", "")).lower()] += count
+                font_name = str(span.get("font", "")).lower()
+                font_names[font_name] += count
+                is_math_font = any(hint in font_name for hint in _MATH_FONT_HINTS)
+                if is_math_font and any(ch in _MATH_CHARS for ch in text):
+                    span_meta.append(
+                        {
+                            "text": text,
+                            "bbox": [round(float(v), 2) for v in span.get("bbox", (0, 0, 0, 0))],
+                            "math": True,
+                        }
+                    )
             line_text = "".join(pieces).strip()
             if line_text:
                 lines.append(line_text)
@@ -359,6 +371,7 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
                 "bold_ratio": round(bold_ratio, 3),
                 "math_font_ratio": round(math_font_chars / max(total_chars, 1), 3),
                 "lines": len(lines),
+                **({"spans": span_meta} if span_meta else {}),
             },
         )
         blocks.append(block)
@@ -939,6 +952,37 @@ def _pages_requiring_ocr(pages: list[PageData], config: AppConfig) -> list[int]:
     return result
 
 
+def _assign_columns(pages: list[PageData]) -> None:
+    """Record the visual column of each block for layout-preserving rendering."""
+
+    for page in pages:
+        width = max(1.0, page.width)
+        regular = [
+            b
+            for b in page.blocks
+            if b.bbox[2] - b.bbox[0] < width * 0.68
+            and (b.bbox[2] - b.bbox[0]) > width * 0.18
+            and len(b.text.strip()) >= 40
+        ]
+        left = [b for b in regular if b.bbox[0] < width * 0.35]
+        right = [b for b in regular if b.bbox[0] > width * 0.50]
+        two_columns = len(left) >= 1 and len(right) >= 1 and len(regular) >= 2
+        if not two_columns:
+            for block in page.blocks:
+                block.meta["columns"] = 1
+                block.meta["column"] = 1
+            continue
+        for block in page.blocks:
+            block_width = block.bbox[2] - block.bbox[0]
+            full = block_width >= width * 0.68
+            if full:
+                column = 0
+            else:
+                column = 1 if (block.bbox[0] + block.bbox[2]) / 2 < width * 0.5 else 2
+            block.meta["columns"] = 2
+            block.meta["column"] = column
+
+
 def _reading_order(blocks: list[Block], page_width: float, page_height: float) -> list[Block]:
     if len(blocks) <= 1:
         return blocks
@@ -946,16 +990,20 @@ def _reading_order(blocks: list[Block], page_width: float, page_height: float) -
     left = [
         b
         for b in text_blocks
-        if (b.bbox[0] + b.bbox[2]) / 2 < page_width * 0.47
+        if b.bbox[0] < page_width * 0.35
         and (b.bbox[2] - b.bbox[0]) < page_width * 0.56
+        and (b.bbox[2] - b.bbox[0]) > page_width * 0.18
+        and len(b.text.strip()) >= 40
     ]
     right = [
         b
         for b in text_blocks
-        if (b.bbox[0] + b.bbox[2]) / 2 > page_width * 0.53
+        if b.bbox[0] > page_width * 0.50
         and (b.bbox[2] - b.bbox[0]) < page_width * 0.56
+        and (b.bbox[2] - b.bbox[0]) > page_width * 0.18
+        and len(b.text.strip()) >= 40
     ]
-    two_columns = len(left) >= 2 and len(right) >= 2
+    two_columns = len(left) >= 1 and len(right) >= 1
     if not two_columns:
         return sorted(blocks, key=lambda b: (round(b.bbox[1], 1), b.bbox[0]))
 
@@ -1220,6 +1268,7 @@ def merge_ocr_pages(
     _remove_ocr_headers_footers(structure.pages)
     structure.reindex()
     _mark_references(structure.pages)
+    _assign_columns(structure.pages)
     return structure
 
 

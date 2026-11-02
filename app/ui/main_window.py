@@ -29,14 +29,13 @@ from ..config import REASONING_LABELS, REASONING_OPTIONS, AppConfig
 from ..llm import build_chat_context
 from ..logging_setup import get_logger
 from ..models import DocumentStructure
-from ..ocr_client import OcrClient
 from ..paths import EXPORT_DIR, HOME, TMP_DIR, app_home, resource_path
 from ..pdf.cache import DocumentCache
-from ..pdf.extractor import merge_ocr_pages
 from ..review import apply_review_removals, review_candidates
 from ..workers import ChatWorker, PrepareWorker, ReviewWorker, TranslationWorker
 from . import theme as theme_module
 from .chat_view import ChatView
+from .floating_chat import FloatingChat
 from .pdf_view import PdfViewer
 from .richtext import escape, render_document
 from .settings_dialog import SettingsDialog
@@ -76,9 +75,6 @@ class MainWindow(QMainWindow):
         self._render_timer.setInterval(400)
         self._render_timer.timeout.connect(self._flush_translation)
 
-        self.ocr_client = OcrClient(self.config, self)
-        self._connect_ocr_client()
-
         self.setWindowTitle("EasyPaper · 本地论文阅读翻译问答")
         icon_path = resource_path("easypaper.ico")
         if icon_path.is_file():
@@ -88,7 +84,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1080, 700)
         self._build_ui()
         self._install_shortcuts()
-        QTimer.singleShot(250, self._prewarm_ocr)
         self._update_actions()
         self._update_api_chip()
         self._update_state_chip()
@@ -107,10 +102,8 @@ class MainWindow(QMainWindow):
         if self._middle_is_web and hasattr(self.translation_view, "apply_appearance"):
             self.translation_view.apply_appearance()
         elif not self._middle_is_web:
-            c = theme_module.COLORS
             self.translation_view.setStyleSheet(
-                f"QTextBrowser {{ background:{c.get('panel', '#FFFFFF')}; border:none; "
-                f"color:{c.get('ink', '#20262E')}; }}"
+                "QTextBrowser { background:#FFFFFF; border:none; color:#20262E; }"
             )
         if self.document is not None:
             self._render_translation()
@@ -201,10 +194,8 @@ class MainWindow(QMainWindow):
         if not self._middle_is_web:
             self.translation_view = ZoomTextBrowser(middle_body)
             self.translation_view.external_zoom = True
-            c = theme_module.COLORS
             self.translation_view.setStyleSheet(
-                f"QTextBrowser {{ background:{c.get('panel', '#FFFFFF')}; border:none; "
-                f"color:{c.get('ink', '#20262E')}; }}"
+                "QTextBrowser { background:#FFFFFF; border:none; color:#20262E; }"
             )
             self.translation_view.ctrl_wheel.connect(self._on_middle_zoom)
         middle_body.layout().addWidget(self.translation_view, 1)
@@ -225,6 +216,11 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(middle_panel)
 
         right_panel, right_body, right_header, right_footer = self._make_panel("AI 问答", "")
+        self.chat_hide_button = QToolButton()
+        self.chat_hide_button.setObjectName("ChatHide")
+        self.chat_hide_button.setText("‹")
+        self.chat_hide_button.setToolTip("收起 AI 问答")
+        right_header.insertWidget(0, self.chat_hide_button)
         self.new_chat_button = QPushButton("新对话")
         self.new_chat_button.clicked.connect(self._new_chat)
         right_header.addWidget(self.new_chat_button, 0)
@@ -250,11 +246,11 @@ class MainWindow(QMainWindow):
         footer_widget = right_footer.parentWidget()
         if footer_widget is not None:
             footer_widget.hide()
-        self.splitter.addWidget(right_panel)
-        self.splitter.setStretchFactor(0, 38)
-        self.splitter.setStretchFactor(1, 38)
-        self.splitter.setStretchFactor(2, 24)
+        self.splitter.setStretchFactor(0, 50)
+        self.splitter.setStretchFactor(1, 50)
         self.splitter.setSizes(self.config.ui.splitter_sizes)
+        self.floating_chat = FloatingChat(central, right_panel)
+        self.chat_hide_button.clicked.connect(self.floating_chat.close_panel)
 
         self._build_statusbar()
 
@@ -498,9 +494,10 @@ class MainWindow(QMainWindow):
         )
         self._update_actions()
         if targets:
-            self._start_ocr(targets)
-        else:
-            self._load_translation_and_start()
+            self._set_status(
+                f"OXR 预处理未完成 {len(targets)} 个扫描页；可重新解析或检查 OCR 设置。"
+            )
+        self._load_translation_and_start()
 
     def _on_prepare_failed(self, message: str) -> None:
         self._show_progress(False)
@@ -517,106 +514,6 @@ class MainWindow(QMainWindow):
         self._prepare_worker = None
         if worker is not None:
             worker.deleteLater()
-
-    def _on_ocr_ready(self) -> None:
-        pass
-
-    # ------------------------------------------------------------------- OCR
-    def _connect_ocr_client(self) -> None:
-        self.ocr_client.starting.connect(self._on_ocr_starting)
-        self.ocr_client.progress.connect(self._on_ocr_progress)
-        self.ocr_client.finished.connect(self._on_ocr_finished)
-        self.ocr_client.failed.connect(self._on_ocr_failed)
-        self.ocr_client.cancelled.connect(self._on_ocr_cancelled)
-        self.ocr_client.prewarm_failed.connect(self._on_ocr_prewarm_failed)
-
-    def _on_ocr_prewarm_failed(self, message: str) -> None:
-        log.info("OCR preload skipped: %s", message)
-        self._set_status("OCR 预加载未完成；下次识别扫描页时会再次尝试。")
-
-    def _prewarm_ocr(self) -> None:
-        if self._closing or not self.config.ocr.enabled or not self.config.ocr.prewarm:
-            return
-        if self.config.ocr.mode == "off" or self._ocr_running:
-            return
-        self.ocr_client.config = self.config
-        self.ocr_client.prewarm()
-
-    def _start_ocr(self, targets: list[int]) -> None:
-        if not self.document or not self.pdf_path:
-            return
-        self._ocr_running = True
-        self._translation_state = "ocr"
-        self._translation_note = f"正在使用本地 PaddleOCR-VL 预处理 {len(targets)} 个扫描页…"
-        self._update_state_chip()
-        self._update_actions()
-        self.translation_status.setText(self._translation_note)
-        self._set_middle_html(
-            render_document(
-                self.document,
-                "running",
-                self.config.llm.model,
-                self._translation_note,
-                asset_base=self.cache.root if self.cache else None,
-                zoom=1.0 if self._middle_is_web else self._middle_zoom,
-            ),
-            reset=True,
-        )
-        self._set_busy_status(self._translation_note)
-        self._show_progress(True, 0, len(targets))
-        self.ocr_client.config = self.config
-        self.ocr_client.ocr_document(self.pdf_path, targets)
-
-    def _on_ocr_starting(self, message: str) -> None:
-        self._set_status(message)
-        self.translation_status.setText(message)
-
-    def _on_ocr_progress(self, stage: str, current: int, total: int, message: str) -> None:
-        self._set_status(message)
-        self.translation_status.setText(message)
-        if total:
-            self._show_progress(True, current, total)
-        if self.document and stage in {"ocr", "infer", "loading"}:
-            self._translation_note = message
-
-    def _on_ocr_finished(self, request_id: int, pages: dict, engine: str, elapsed: float) -> None:
-        self._ocr_running = False
-        self._show_progress(False)
-        if not self.document or not self.cache:
-            return
-        if pages:
-            self.cache.invalidate_signature()
-            merge_ocr_pages(self.document, pages, engine or "PaddleOCR-VL", elapsed)
-            self.cache.save_structure(self.document)
-            self._set_status(
-                f"本地 OCR 完成：{len(pages)} 页 · {engine} · {elapsed:.1f}s；"
-                "已写入结构化缓存"
-            )
-            self.translation_status.setText(f"OCR 完成（{len(pages)} 页），开始翻译…")
-        else:
-            self._set_status("OCR 未返回文字，继续使用 PDF 文字层。")
-        self._update_actions()
-        self._load_translation_and_start()
-
-    def _on_ocr_failed(self, message: str) -> None:
-        self._ocr_running = False
-        self._show_progress(False)
-        self._set_status(f"本地 OCR 不可用：{message}")
-        self.translation_status.setText("OCR 不可用，已继续使用 PDF 文字层")
-        if self.document and self.cache:
-            self.document.ocr_summary.update({"status": "failed", "error": message[:500]})
-            try:
-                self.cache.save_structure(self.document)
-            except Exception:
-                log.debug("cannot save OCR failure state", exc_info=True)
-        self._translation_note = f"本地 OCR 不可用，已使用 PDF 文字层。{message}"
-        self._update_actions()
-        self._load_translation_and_start()
-
-    def _on_ocr_cancelled(self) -> None:
-        self._ocr_running = False
-        self._show_progress(False)
-        self._set_status("OCR 已取消")
 
     # ----------------------------------------------------------- translation
     def _load_translation_and_start(self) -> None:
@@ -934,15 +831,6 @@ class MainWindow(QMainWindow):
             )
             self.apply_appearance()
         self._update_api_chip()
-        # Recreate the sidecar client when its paths/device changed.
-        try:
-            self.ocr_client.shutdown()
-            self.ocr_client.deleteLater()
-        except Exception:
-            pass
-        self.ocr_client = OcrClient(self.config, self)
-        self._connect_ocr_client()
-        QTimer.singleShot(300, self._prewarm_ocr)
         if self.document:
             if self._translation_state in {"error", "idle"} and not self._translation_running:
                 self._translation_note = "设置已保存，正在尝试翻译…"
@@ -1145,6 +1033,7 @@ class MainWindow(QMainWindow):
         self._focus_right_panel()
 
     def _focus_right_panel(self) -> None:
+        self.floating_chat.open_panel()
         self.chat.input.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.chat.raise_()
 
@@ -1316,9 +1205,7 @@ class MainWindow(QMainWindow):
         self._cancel_translation()
         self._cancel_review()
         self._cancel_chat()
-        if self._ocr_running:
-            self._ocr_running = False
-            self.ocr_client.cancel()
+        self._ocr_running = False
 
     def _cancel_prepare(self) -> None:
         worker = self._prepare_worker
@@ -1426,6 +1313,11 @@ class MainWindow(QMainWindow):
                 return
         event.ignore()
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if hasattr(self, "floating_chat"):
+            self.floating_chat.sync()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         self._closing = True
         self._render_timer.stop()
@@ -1433,10 +1325,6 @@ class MainWindow(QMainWindow):
         self._cancel_translation()
         self._cancel_review()
         self._cancel_chat()
-        try:
-            self.ocr_client.shutdown()
-        except Exception:
-            pass
         self.pdf_view.shutdown()
         for worker in list(self._retired):
             try:

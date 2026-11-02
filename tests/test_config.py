@@ -31,7 +31,7 @@ def test_env_override_is_not_persisted(tmp_path, monkeypatch):
     assert config.llm.model == "env-model"
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["llm"]["api_key"] == ""
-    assert raw["llm"]["model"] == "gpt-4o-mini"
+    assert raw["llm"]["model"] == "deepseek-flash"
 
 
 def test_env_override_is_not_written_back_on_save(tmp_path, monkeypatch):
@@ -68,6 +68,6 @@ def test_bad_json_is_backed_up(tmp_path):
     path = tmp_path / "config.json"
     path.write_text("{not json", encoding="utf-8")
     config = AppConfig.load(path)
-    assert config.llm.model == "gpt-4o-mini"
+    assert config.llm.model == "deepseek-flash"
     assert (tmp_path / "config.json.bad").is_file()
     assert path.is_file()

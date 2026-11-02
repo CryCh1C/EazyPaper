@@ -275,6 +275,56 @@ def _qss() -> str:
         border-color: {c['border']};
         color: {c['accent_text']};
     }}
+    QToolButton#ChatBall {{
+        background: {c['accent']};
+        color: {c['panel']};
+        border: 1px solid {c['accent']};
+        border-radius: 18px;
+        font-size: 14pt;
+        font-weight: 700;
+        padding: 0;
+    }}
+    QToolButton#ChatBall:hover {{
+        background: {c['accent_dark']};
+    }}
+    QToolButton#ChatDrag {{
+        background: transparent;
+        color: {c['muted']};
+        border: none;
+        font-size: 11pt;
+        padding: 0;
+    }}
+    QToolButton#ChatDrag:hover {{
+        background: {c['panel_alt']};
+        color: {c['ink']};
+    }}
+    QToolButton#ChatEdge {{
+        background: {c['accent']};
+        color: {c['panel']};
+        border: 1px solid {c['accent']};
+        border-top-left-radius: 10px;
+        border-bottom-left-radius: 10px;
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+        font-size: 8pt;
+        font-weight: 700;
+        padding: 0;
+    }}
+    QToolButton#ChatEdge:hover {{
+        background: {c['accent_dark']};
+    }}
+    QToolButton#ChatHide {{
+        background: transparent;
+        color: {c['muted']};
+        border: none;
+        border-radius: 8px;
+        font-size: 15pt;
+        padding: 0 6px;
+    }}
+    QToolButton#ChatHide:hover {{
+        background: {c['panel_alt']};
+        color: {c['ink']};
+    }}
     QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
         background: {c['panel']};
         border: 1px solid {c['border_strong']};

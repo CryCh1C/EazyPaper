@@ -57,12 +57,10 @@ class TranslationWebView(QWebEngineView):
         self.apply_appearance()
 
     def apply_appearance(self) -> None:
-        dark = theme_module.is_dark()
-        panel = theme_module.COLORS.get("panel", "#FFFFFF")
-        self._page.setBackgroundColor(QColor("#12161B" if dark else panel))
-        self.setStyleSheet(
-            f"QWebEngineView {{ background:{'#12161B' if dark else panel}; border:none; }}"
-        )
+        # Translation is always a white reading surface, independent of the
+        # application chrome theme.
+        self._page.setBackgroundColor(QColor("#FFFFFF"))
+        self.setStyleSheet("QWebEngineView { background:#FFFFFF; border:none; }")
 
     def set_html(self, html: str, base_dir: Path | str, keep_position: bool = True) -> None:
         base = Path(base_dir).resolve()

@@ -120,6 +120,7 @@ def test_main_window_loads_pdf(qtbot, sample_pdf, config, monkeypatch):
     assert window.translation_view.top_anchor() == top_before
     assert window.review_button.text() in {"审查", "审查中…"}
 
+    window.floating_chat.open_panel()
     window.chat.attach_quote("selected source text", 1)
     assert window.chat.quote_text == "selected source text"
     assert window.chat.quote_page == 1

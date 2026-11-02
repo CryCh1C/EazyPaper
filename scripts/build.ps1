@@ -22,11 +22,13 @@ $env:TMP = Join-Path $ProjectRoot ".tmp"
 $env:TEMP = $env:TMP
 $env:PYTHONPYCACHEPREFIX = Join-Path $ProjectRoot ".pycache"
 $env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONNOUSERSITE = "1"
+$env:PYTHONUSERBASE = Join-Path $ProjectRoot ".pyuserbase"
 New-Item -ItemType Directory -Force -Path $env:TMP, ".uv-cache", ".uv-python", ".uv-python-cache", ".pip-cache" | Out-Null
 
 Write-Host "=== EasyPaper build ===" -ForegroundColor Cyan
 Write-Host "Project : $ProjectRoot"
-Write-Host "Python  : 3.14 (uv virtual environment)"
+Write-Host "Python  : 3.12 (uv virtual environment)"
 Write-Host "Index   : $IndexUrl"
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -35,22 +37,22 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
-    Write-Host "`n[1/4] Creating Python 3.14 venv..." -ForegroundColor Yellow
+    Write-Host "`n[1/4] Creating Python 3.12 venv..." -ForegroundColor Yellow
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { throw "uv missing" }
     try {
-        uv python install 3.14
+        uv python install 3.12
     } catch {
-        Write-Warning "uv python install failed. Falling back to an installed 3.14 interpreter."
+        Write-Warning "uv python install failed. Falling back to an installed 3.12 interpreter."
     }
-    uv venv --python 3.14 .venv
+    uv venv --python 3.12 .venv
 }
 
 if (-not (Test-Path $VenvPython)) {
-    throw "Python 3.14 venv was not created at $VenvPython"
+    throw "Python 3.12 venv was not created at $VenvPython"
 }
 $Version = & $VenvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-if ($Version -ne "3.14") {
-    throw "The existing .venv uses Python $Version, expected 3.14. Remove .venv and rerun."
+if ($Version -ne "3.12") {
+    throw "The existing .venv uses Python $Version, expected 3.12. Remove .venv and rerun."
 }
 Write-Host "`n[2/4] Interpreter: $(& $VenvPython --version)" -ForegroundColor Green
 
@@ -94,7 +96,7 @@ $BuiltExe = Join-Path $BuiltDir "EasyPaper.exe"
 if (-not (Test-Path $BuiltExe)) { throw "Build did not produce $BuiltExe" }
 
 # Place the executable and its private _internal directory at the project root
-# so app_home(), config.json, paddle_ocr and cache/ stay side by side.
+# so app_home(), config.json, oxr and cache/ stay side by side.
 if (Test-Path (Join-Path $ProjectRoot "EasyPaper.exe")) {
     Remove-Item (Join-Path $ProjectRoot "EasyPaper.exe") -Force
 }
@@ -135,8 +137,8 @@ $ExeMb = [math]::Round((Get-Item $Exe).Length / 1MB, 1)
 $TotalMb = [math]::Round(((Get-Item $Exe).Length + (Get-ChildItem $Internal -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
 Write-Host "`nBUILD OK" -ForegroundColor Green
 Write-Host "  $Exe  (exe $ExeMb MB; runtime folder total $TotalMb MB)"
-Write-Host "  _internal\  PySide6/PyMuPDF/OpenAI runtime (keep beside the exe)"
-Write-Host "  OCR sidecar : .venv\Scripts\python.exe + _internal\tools\ocr_worker.py (not embedded)"
-Write-Host "  Model       : .\paddle_ocr"
+Write-Host "  _internal\  PySide6/PyMuPDF/OpenAI/torch/transformers runtime (keep beside the exe)"
+Write-Host "  OCR         : OXR adapter embedded in app.ocr (torch/transformers in _internal)"
+Write-Host "  Model       : .\oxr (external)"
 Write-Host "  Config      : .\config.json"
 Write-Host "  Cache/logs  : .\cache, .\logs"

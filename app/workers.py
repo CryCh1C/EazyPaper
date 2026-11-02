@@ -28,8 +28,10 @@ from .pdf.extractor import (
     ExtractionCancelled,
     extract_document,
     hash_file,
+    merge_ocr_pages,
     ocr_target_pages,
 )
+from .ocr import OcrService
 from .review import review_translation
 
 log = get_logger("workers")
@@ -56,6 +58,48 @@ class PrepareWorker(QThread):
     def cancel(self) -> None:
         self._cancelled.set()
 
+    def _enhance_with_oxr(self, document: DocumentStructure, cache: DocumentCache) -> None:
+        """Run the provider-neutral OCR layer without blocking the GUI."""
+        if not self.config.ocr.enabled or self.config.ocr.mode == "off":
+            return
+        service = OcrService(self.config)
+        try:
+            targets = ocr_target_pages(document, self.config)
+            if targets:
+                pages = service.parse_scanned_pages(
+                    document,
+                    self.pdf_path,
+                    targets,
+                    progress=lambda phase, cur, total, msg: self.progress.emit(phase, cur, total, msg),
+                )
+                if pages:
+                    merge_ocr_pages(
+                        document,
+                        {number: page.text for number, page in pages.items()},
+                        pages[next(iter(pages))].engine,
+                        sum(page.elapsed for page in pages.values()),
+                    )
+                    self.progress.emit("ocr", len(pages), len(pages), "OXR 扫描页解析完成")
+            if self._cancelled.is_set():
+                raise ExtractionCancelled()
+            # Standalone formula blocks are already embedded as original
+            # page crops.  OXR LaTeX is only needed for inline math spans.
+            service.enhance_inline_formulas(
+                document,
+                self.pdf_path,
+                cache.root / "assets",
+                progress=lambda phase, cur, total, msg: self.progress.emit(phase, cur, total, msg),
+            )
+        except ExtractionCancelled:
+            raise
+        except Exception as exc:
+            # OCR enhancement is best-effort: a missing model or a bad page must
+            # not make the whole PDF unreadable.
+            log.warning("OXR preprocessing skipped: %s", exc, exc_info=True)
+            self.progress.emit("ocr", 0, 1, f"OXR 预处理跳过：{exc}")
+        finally:
+            service.close()
+
     def run(self) -> None:
         try:
             self.progress.emit("hash", 0, 1, "正在计算 PDF 指纹…")
@@ -76,6 +120,7 @@ class PrepareWorker(QThread):
                     known_hash=digest,
                     asset_dir=cache.root / "assets",
                 )
+                self._enhance_with_oxr(document, cache)
                 cache.save_structure(document)
                 self.progress.emit("cache", 1, 1, "结构化 JSON 缓存已写入 cache/")
             if self._cancelled.is_set():

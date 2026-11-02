@@ -3,7 +3,6 @@
 .uv-cache/
 .uv-python/
 .uv-python-cache/
-.uv-python/.temp/
 .pip-cache/
 .pyinstaller-cache/
 .pycache/
@@ -16,27 +15,26 @@ pytest-cache-files-*/
 # EasyPaper runtime data (config contains a local API key)
 config.json
 config.json.bad
-*.log
 cache/
 logs/
 exports/
 .tmp/
 .webengine/
 .easypaper-runtime/
-.cache/
-
-# Build artifacts (rebuild with scripts\build.ps1)
-_build/
-build/
-build-debug/
-dist/
+.build-dist/
 _internal/
 EasyPaper.exe
 EasyPaperDebug.exe
+build/
+build-debug/
+dist/
 
 # Local model weights are intentionally kept out of source control.
 paddle_ocr/model.safetensors
 paddle_ocr/*.safetensors
+# OXR-1.0 model dir (user-created, weights ~3 GB)
+oxr/
+oxr/*
 .paddle-cache/
 .hf-cache/
 .torch-cache/

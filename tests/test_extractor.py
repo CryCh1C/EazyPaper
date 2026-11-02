@@ -242,3 +242,30 @@ def test_translation_cache_roundtrip(sample_pdf, config, tmp_path, monkeypatch):
     config.llm.model = "another-model"
     cache.invalidate_signature()
     assert cache.load_translation(doc) is None
+
+
+def test_test_samples_keep_single_and_double_column_layout(tmp_path):
+    from app.ui.richtext import render_document
+
+    root = Path(__file__).resolve().parents[1]
+    single = root / "test_sample1.pdf"
+    double = root / "test_sample2.pdf"
+    if not single.is_file() or not double.is_file():
+        return
+    config = AppConfig()
+    config.ocr.enabled = False
+    one = extract_document(
+        single, config, known_hash="sample-one", asset_dir=tmp_path / "one" / "assets"
+    )
+    two = extract_document(
+        double, config, known_hash="sample-two", asset_dir=tmp_path / "two" / "assets"
+    )
+    assert all(max(int(b.meta.get("columns", 1)) for b in p.blocks) == 1 for p in one.pages)
+    assert all(max(int(b.meta.get("columns", 1)) for b in p.blocks) == 2 for p in two.pages)
+    html = render_document(two, asset_base=tmp_path / "two" / "assets")
+    assert "page-columns" in html
+    assert "page-column" in html
+    assert '<div id="camera-shell">' in html
+    assert 'id="camera"' in html
+    assert "body.style.zoom" not in html
+    assert "scale(" in html

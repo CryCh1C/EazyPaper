@@ -146,8 +146,8 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 16, 14, 14)
         layout.setSpacing(10)
         note = QLabel(
-            "数字版 PDF 优先使用内嵌文字层（保真度最高）；扫描页才会调用本地 PaddleOCR-VL。"
-            "OCR 在独立进程中运行，不会阻塞界面。"
+            "数字版 PDF 优先使用内嵌文字层；扫描页和公式由本地 OXR-1.0 在后台预处理线程中解析。"
+            "模型加载与推理不会占用 GUI 线程。"
         )
         note.setObjectName("Muted")
         note.setWordWrap(True)
@@ -176,18 +176,6 @@ class SettingsDialog(QDialog):
         model_layout.addWidget(browse_model)
         form.addRow("模型目录", model_row)
 
-        python_row = QWidget()
-        python_layout = QHBoxLayout(python_row)
-        python_layout.setContentsMargins(0, 0, 0, 0)
-        python_layout.setSpacing(6)
-        self.python_path = QLineEdit()
-        self.python_path.setPlaceholderText("留空自动使用 .venv\\Scripts\\python.exe")
-        python_layout.addWidget(self.python_path, 1)
-        browse_python = QPushButton("浏览…")
-        browse_python.clicked.connect(lambda: self._browse_python(self.python_path))
-        python_layout.addWidget(browse_python)
-        form.addRow("OCR Python", python_row)
-
         self.ocr_device = QComboBox()
         self.ocr_device.addItem("自动", "auto")
         self.ocr_device.addItem("CPU", "cpu")
@@ -211,6 +199,14 @@ class SettingsDialog(QDialog):
         form.addRow("OCR 批量", self.ocr_batch)
         self.ocr_prewarm = QCheckBox("启动后预加载 OCR 模型（隐藏首次模型加载等待）")
         form.addRow("预加载", self.ocr_prewarm)
+        self.inline_latex = QCheckBox("行内短公式用 OXR 识别为 LaTeX（KaTeX 渲染）")
+        form.addRow("行内公式", self.inline_latex)
+        self.inline_limit = QSpinBox()
+        self.inline_limit.setRange(0, 200)
+        self.inline_limit.setSpecialValueText("全部")
+        self.inline_limit.setSuffix(" 个/篇")
+        self.inline_limit.setToolTip("0 表示不限制；限制可避免首次 OXR 预处理过久。")
+        form.addRow("公式上限", self.inline_limit)
 
         self.ocr_timeout = QSpinBox()
         self.ocr_timeout.setRange(60, 14400)
@@ -289,7 +285,7 @@ class SettingsDialog(QDialog):
         text = QLabel(
             "<b>EasyPaper 1.0</b><br><br>"
             "轻量本地论文阅读 / 翻译 / 问答工具。<br>"
-            "Python 3.14 · PySide6 · PyMuPDF · PaddleOCR-VL · OpenAI 兼容 API。<br><br>"
+            "Python 3.12 · PySide6 · PyMuPDF · OXR-1.0 · OpenAI 兼容 API。<br><br>"
             "<b>数据目录</b><br>"
             f"配置：{CONFIG_PATH}<br>"
             f"结构化缓存：{CACHE_DIR}\\&lt;PDF 指纹&gt;\\structure.json<br>"
@@ -319,13 +315,14 @@ class SettingsDialog(QDialog):
         index = self.ocr_mode.findData(c.ocr.mode)
         self.ocr_mode.setCurrentIndex(max(0, index))
         self.model_dir.setText(c.ocr.model_dir)
-        self.python_path.setText(c.ocr.python_path)
         index = self.ocr_device.findData(c.ocr.device)
         self.ocr_device.setCurrentIndex(max(0, index))
         self.ocr_dpi.setValue(c.ocr.dpi)
         self.ocr_max_pixels.setValue(c.ocr.max_pixels)
         self.ocr_batch.setValue(c.ocr.batch_size)
         self.ocr_prewarm.setChecked(c.ocr.prewarm)
+        self.inline_latex.setChecked(c.ocr.inline_latex)
+        self.inline_limit.setValue(c.ocr.inline_formula_limit)
         self.ocr_timeout.setValue(c.ocr.timeout_seconds)
         self.target_language.setText(c.translation.target_language)
         self.chunk_chars.setValue(c.translation.chunk_chars)
@@ -340,32 +337,19 @@ class SettingsDialog(QDialog):
         self.color_theme.setCurrentIndex(index if index >= 0 else 0)
         self._update_ocr_status()
         self.model_dir.textChanged.connect(self._update_ocr_status)
-        self.python_path.textChanged.connect(self._update_ocr_status)
 
     def _update_ocr_status(self) -> None:
         path = Path(self.model_dir.text().strip()).expanduser()
         if not path.is_absolute():
             path = CONFIG_PATH.parent / path
         model_ok = (path / "config.json").is_file() and (path / "model.safetensors").is_file()
-        python = self.python_path.text().strip()
-        python_path = Path(python).expanduser() if python else None
-        if python_path is not None and not python_path.is_absolute():
-            python_path = CONFIG_PATH.parent / python_path
-        if python_path is not None and not python_path.is_file():
-            python_ok = False
-        else:
-            python_ok = True
         pieces = []
         if model_ok:
             pieces.append("✓ 已找到 config.json / model.safetensors")
         else:
             pieces.append("✗ 模型目录不完整（需要 config.json 与 model.safetensors）")
-        if not python_ok:
-            pieces.append("✗ 指定的 OCR Python 不存在")
-        elif not python:
-            pieces.append("OCR Python 将自动从 .venv 或 ocr-runtime 查找")
         self.ocr_status.setText("  ·  ".join(pieces))
-        self.ocr_status.setStyleSheet("color:#0F766E;" if model_ok and python_ok else "color:#C2410C;")
+        self.ocr_status.setStyleSheet("color:#0F766E;" if model_ok else "color:#C2410C;")
 
     # ------------------------------------------------------------------ actions
     def _toggle_key(self, visible: bool) -> None:
@@ -376,7 +360,7 @@ class SettingsDialog(QDialog):
 
     def _browse_dir(self, target: QLineEdit) -> None:
         start = target.text().strip() or str(CONFIG_PATH.parent)
-        directory = QFileDialog.getExistingDirectory(self, "选择 PaddleOCR-VL 模型目录", start)
+        directory = QFileDialog.getExistingDirectory(self, "选择 OXR 模型目录", start)
         if directory:
             target.setText(directory)
 
@@ -396,12 +380,13 @@ class SettingsDialog(QDialog):
         config.ocr.enabled = self.ocr_enabled.isChecked()
         config.ocr.mode = str(self.ocr_mode.currentData())
         config.ocr.model_dir = self.model_dir.text().strip()
-        config.ocr.python_path = self.python_path.text().strip()
         config.ocr.device = str(self.ocr_device.currentData())
         config.ocr.dpi = self.ocr_dpi.value()
         config.ocr.max_pixels = self.ocr_max_pixels.value()
         config.ocr.batch_size = self.ocr_batch.value()
         config.ocr.prewarm = self.ocr_prewarm.isChecked()
+        config.ocr.inline_latex = self.inline_latex.isChecked()
+        config.ocr.inline_formula_limit = self.inline_limit.value()
         config.ocr.timeout_seconds = self.ocr_timeout.value()
         config.translation.target_language = self.target_language.text().strip() or "简体中文"
         config.translation.chunk_chars = self.chunk_chars.value()
