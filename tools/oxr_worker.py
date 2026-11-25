@@ -46,6 +46,12 @@ import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM
 
+# The external worker runs from _internal/tools (or tools/), where the
+# downloaded D-FINE service package lives next to this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dfine_la.model.model import load_model as load_layout_model
+from dfine_la.preprocess import preprocess_images
+
 PROMPT_PAGE = "Recognize the whole page content of the image."
 PROMPT_FORMULA = "Recognize the formula of the image into LaTeX format."
 
@@ -63,6 +69,48 @@ def clean(text: str) -> str:
         if len(lines) >= 2:
             value = "\n".join(lines[1:-1]).strip()
     return value
+
+
+class LayoutEngine:
+    def __init__(self, model_dir: Path, device: str):
+        self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
+        self.model = load_layout_model(
+            model_dir / "layout_analysis" / "last.pth",
+            torch.device(self.device),
+            num_classes=12,
+            image_size=960,
+        )
+
+    def detect(self, image: Image.Image, page_width: float, page_height: float):
+        import numpy as np
+
+        array = np.asarray(image.convert("RGB"))
+        tensor, sizes = preprocess_images([array], 960)
+        tensor = tensor.to(self.device)
+        sizes = sizes.to(self.device)
+        with torch.no_grad():
+            labels, boxes, scores = self.model(tensor, sizes)
+        labels = labels[0].detach().cpu().tolist()
+        boxes = boxes[0].detach().cpu().tolist()
+        scores = scores[0].detach().cpu().tolist()
+        sx = float(page_width) / max(1, image.width)
+        sy = float(page_height) / max(1, image.height)
+        result = []
+        for label, box, score in zip(labels, boxes, scores):
+            if int(label) != 2 or float(score) < 0.5:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in box]
+            x1, x2 = sorted((x1 * sx, x2 * sx))
+            y1, y2 = sorted((y1 * sy, y2 * sy))
+            if x2 - x1 < 4 or y2 - y1 < 4:
+                continue
+            result.append(
+                {
+                    "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                    "score": round(float(score), 4),
+                }
+            )
+        return result
 
 
 class Engine:
@@ -179,6 +227,33 @@ def main() -> int:
         model_dir = Path(args.model_dir).expanduser()
         if not (model_dir / "config.json").is_file() or not (model_dir / "model.safetensors").is_file():
             raise FileNotFoundError(f"OXR 模型不完整：{model_dir}")
+        if request.get("cmd") == "layout":
+            layout = LayoutEngine(model_dir, args.device)
+            pdf = pymupdf.open(str(pdf_path))
+            pages: dict[str, list] = {}
+            try:
+                for page_number in request.get("pages", []) or []:
+                    page = pdf.load_page(int(page_number) - 1)
+                    scale = args.dpi / 72.0
+                    pix = page.get_pixmap(
+                        matrix=pymupdf.Matrix(scale, scale),
+                        alpha=False,
+                        colorspace=pymupdf.csRGB,
+                    )
+                    image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    pages[str(page_number)] = layout.detect(
+                        image, float(page.rect.width), float(page.rect.height)
+                    )
+            finally:
+                pdf.close()
+            emit(
+                {
+                    "ok": True,
+                    "formulas": pages,
+                    "elapsed": round(time.perf_counter() - started, 3),
+                }
+            )
+            return 0
         engine = Engine(model_dir, args.device, args.max_pixels)
         pdf = pymupdf.open(str(pdf_path))
         try:

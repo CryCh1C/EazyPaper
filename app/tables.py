@@ -1,10 +1,11 @@
-"""Markdown table parsing used for structure-preserving translation."""
+"""Table parsing and rendering used for structure-preserving translation."""
 
 from __future__ import annotations
 
 import html
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
 
 
@@ -79,6 +80,72 @@ def to_markdown(rows: list[list[str]], has_header: bool = True) -> str:
         body = normalized
     lines.extend("| " + " | ".join(row) + " |" for row in body)
     return "\n".join(lines)
+
+
+class _OcrTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[tuple[str, int, int]]] = []
+        self.row: list[tuple[str, int, int]] | None = None
+        self.parts: list[str] | None = None
+        self.rowspan = self.colspan = 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self.handle_endtag("tr")
+            self.row = []
+        elif tag in {"td", "th"} and self.row is not None:
+            self.handle_endtag("td")
+            self.parts = []
+            values = dict(attrs)
+            self.rowspan = self._span(values.get("rowspan"))
+            self.colspan = self._span(values.get("colspan"))
+        elif tag == "br" and self.parts is not None:
+            self.parts.append("\n")
+
+    @staticmethod
+    def _span(value: str | None) -> int:
+        return int(value) if value and re.fullmatch(r"[1-9][0-9]?", value) else 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th", "tr", "table"} and self.parts is not None and self.row is not None:
+            self.row.append(("".join(self.parts).strip(), self.rowspan, self.colspan))
+            self.parts = None
+        if tag in {"tr", "table"} and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
+
+    def handle_data(self, data: str) -> None:
+        if self.parts is not None:
+            self.parts.append(data)
+
+
+def parse_ocr_html_table(text: str) -> tuple[list[list[str]], dict[str, Any]] | None:
+    """Convert the OCR worker's HTML into plain cell text and grid geometry."""
+    parser = _OcrTableParser()
+    parser.feed(text)
+    parser.close()
+    nrows = len(parser.rows)
+    cells = []
+    occupied_until: dict[int, int] = {}
+    for row, values in enumerate(parser.rows):
+        col = 0
+        for value, rowspan, colspan in values:
+            while any(occupied_until.get(c, 0) > row for c in range(col, col + colspan)):
+                col += 1
+            rowspan = min(rowspan, nrows - row)
+            cells.append({"r": row, "c": col, "rs": rowspan, "cs": colspan,
+                          "text": value, "cell_index": len(cells)})
+            for c in range(col, col + colspan):
+                occupied_until[c] = row + rowspan
+            col += colspan
+    if not cells:
+        return None
+    ncols = max(occupied_until) + 1
+    rows = [[""] * ncols for _ in range(nrows)]
+    for cell in cells:
+        rows[cell["r"]][cell["c"]] = cell["text"]
+    return rows, {"nrows": nrows, "ncols": ncols, "has_header": True, "cells": cells}
 
 
 def grid_to_html(grid: dict[str, Any], translations: dict[int, str] | None = None) -> str:

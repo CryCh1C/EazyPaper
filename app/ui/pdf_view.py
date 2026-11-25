@@ -382,7 +382,7 @@ class PdfViewer(QWidget):
         self.container_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll)
-        self.empty = QLabel("打开一篇 PDF 开始阅读", self.container)
+        self.empty = QLabel("打开或拖入 PDF", self.container)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.container_layout.addWidget(self.empty, 0, Qt.AlignmentFlag.AlignHCenter)
 

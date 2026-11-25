@@ -20,11 +20,9 @@ h1 { font-size:20pt; margin:10px 0 6px 0; line-height:1.35; color:#17212B; }
 h2 { font-size:15pt; margin:16px 0 5px 0; color:#17212B; border-bottom:1px solid #E6E1D6; padding-bottom:3px; }
 h3 { font-size:12.5pt; margin:13px 0 4px 0; color:#1E3A3A; }
 p { margin:6px 0 9px 0; line-height:1.75; }
-.meta { color:#6F746F; font-size:9pt; }
 .byline { color:#6F746F; font-size:10pt; margin-bottom:6px; }
 .page-divider { margin:22px 0 8px 0; border-top:1px dashed #D8D2C6; padding-top:7px;
                 color:#8A8E88; font-size:8.5pt; letter-spacing:0.5px; }
-.block-label { color:#9A8F7C; font-size:8pt; margin-right:7px; }
 .paragraph { color:#20262E; }
 .caption { color:#555A54; font-size:9.5pt; font-style:italic; margin:5px 0 10px 0; }
 .formula { background:#F7F5F0; border-left:3px solid #D6A46A; padding:8px 11px;
@@ -50,24 +48,28 @@ p { margin:6px 0 9px 0; line-height:1.75; }
              color:#9A9182; font-size:9pt; margin:8px 0; background:#FBFAF7; }
 .untranslated { color:#837C6F; }
 .translating { color:#9B9487; font-style:italic; }
-.badge { background:#F3EEE3; border-radius:7px; padding:1px 5px; color:#8C7B5F; font-size:7.5pt; }
 .source-note { color:#A79D8D; font-size:8pt; }
 .toc-note { background:#F8F6F1; border:1px solid #E8E2D7; border-radius:8px; padding:8px 10px;
             color:#6F746F; font-size:9pt; margin:8px 0 14px 0; }
 .page-columns { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:22px;
                  align-items:start; margin:0 0 14px 0; }
 .page-column { min-width:0; }
+.page-column[data-column="1"] { grid-column:1; }
+.page-column[data-column="2"] { grid-column:2; }
 .page-full { grid-column:1 / -1; min-width:0; }
 #camera-shell { position:relative; width:100%; min-height:1px; }
 #camera { width:100%; transform-origin:0 0; will-change:transform; }
-@media (max-width:600px) { .page-columns { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:600px) {
+  .page-columns { grid-template-columns:minmax(0,1fr); }
+  .page-column[data-column] { grid-column:1; }
+}
 """
 
 _DARK_CSS = """
 body.dark { background:#12161B; color:#E8EBEF; }
 body.dark h1, body.dark h2, body.dark h3 { color:#F0F3F6; }
 body.dark h2 { border-bottom-color:#303841; }
-body.dark .meta, body.dark .byline, body.dark .caption, body.dark .source-note,
+body.dark .byline, body.dark .caption, body.dark .source-note,
 body.dark .toc-note, body.dark .reference-title, body.dark .translating { color:#A3ACB6; }
 body.dark .paragraph, body.dark .reference { color:#E8EBEF; }
 body.dark .page-divider { border-top-color:#303841; color:#8E98A3; }
@@ -79,7 +81,6 @@ body.dark .grid-cell.empty { background:#171B21; }
 body.dark .region-image img, body.dark .figure img { background:#FFFFFF; border-color:#46515D; }
 body.dark .figure-ph { background:#171B21; border-color:#46515D; color:#A3ACB6; }
 body.dark .toc-note { background:#171B21; border-color:#303841; color:#A3ACB6; }
-body.dark .badge { background:#222831; color:#C4B5FD; }
 body.dark a { color:#5EEAD4; }
 body.dark .untranslated { color:#A3ACB6; }
 body.dark .block-label { color:#C4B5FD; }
@@ -172,10 +173,8 @@ def _scaled_css(zoom: float) -> str:
     h1 {{ font-size:{20 * z:.2f}pt; }}
     h2 {{ font-size:{15 * z:.2f}pt; }}
     h3 {{ font-size:{12.5 * z:.2f}pt; }}
-    .meta {{ font-size:{9 * z:.2f}pt; }}
     .byline {{ font-size:{10 * z:.2f}pt; }}
     .page-divider {{ font-size:{8.5 * z:.2f}pt; }}
-    .block-label {{ font-size:{8 * z:.2f}pt; }}
     .caption {{ font-size:{9.5 * z:.2f}pt; }}
     .formula {{ font-size:{10 * z:.2f}pt; }}
     .reference {{ font-size:{9 * z:.2f}pt; }}
@@ -248,9 +247,6 @@ def render_block(
     zoom: float = 1.0,
     max_image_width: int | None = None,
 ) -> str:
-    label = escape(block.display_label)
-    if block.kind == "caption" and re.match(r"^\s*(?:table|tab\.?|表)", block.text, re.IGNORECASE):
-        label = "表注"
     translated = block.translation.strip()
     source = block.text.strip()
     if block.kind == "figure":
@@ -269,10 +265,7 @@ def render_block(
         grid = block.meta.get("table")
         if isinstance(grid, dict) and grid.get("cells"):
             return grid_to_html(grid)
-        content = translated or source
-        if not translated and status == "running":
-            return f'<div class="translating">表格翻译中…</div>{render_table(source)}'
-        return render_table(content)
+        return render_table(translated or source)
     if block.kind == "formula":
         if block.meta.get("region_image"):
             image = _region_image_html(
@@ -298,7 +291,7 @@ def render_block(
         return f"<{tag}>{inline(translated or source, block)}</{tag}>"
     if block.kind == "caption":
         value = translated or source
-        return f'<p class="caption"><span class="block-label">{label}</span>{inline(value, block)}</p>'
+        return f'<p class="caption">{inline(value, block)}</p>'
     if block.kind == "reference":
         return f'<p class="reference">{inline(source, block)}</p>'
     if not translated:
@@ -338,7 +331,7 @@ def _render_page(
     blocks = [b for b in page.blocks if not b.hidden]
     out = [
         f'<div class="translation-page"><a name="page-{page.number}"></a>',
-        f'<div class="page-divider">第 {page.number} 页 / Page {page.number}</div>',
+        f'<div class="page-divider">第 {page.number} 页</div>',
     ]
     if not blocks:
         out.append("</div>")
@@ -367,7 +360,7 @@ def _render_page(
         if column != current_column:
             if current_column is not None:
                 out.append("</div>")
-            out.append('<div class="page-column">')
+            out.append(f'<div class="page-column" data-column="{column}">')
             current_column = column
         out.append(_block_html(block, document, status, asset_base, zoom))
     if current_column is not None:
@@ -379,8 +372,6 @@ def _render_page(
 def render_document(
     document: DocumentStructure | None,
     status: str = "idle",
-    model: str = "",
-    message: str = "",
     asset_base: Path | None = None,
     zoom: float = 1.0,
     dark: bool | None = None,
@@ -389,11 +380,7 @@ def render_document(
     # surrounding application chrome can still follow the dark theme.
     dark = False
     if document is None:
-        return _empty_state(
-            "打开一篇 PDF",
-            "",
-            dark=dark,
-        )
+        return "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body></body></html>"
     zoom = max(0.5, min(3.0, float(zoom)))
     katex_dir = resource_path("katex")
     katex_css = (katex_dir / "katex.min.css")
@@ -416,24 +403,13 @@ def render_document(
     ]
     if document.authors:
         parts.append(f'<div class="byline">{inline(document.authors)}</div>')
-    stats = document.stats()
-    meta = f"{stats['pages']} 页 · {stats['translatable']} 个可译块"
-    if stats["tables"]:
-        meta += f" · {stats['tables']} 个表格"
-    if stats["formulas"]:
-        meta += f" · {stats['formulas']} 个公式"
-    if model:
-        meta += f" · {escape(model)}"
-    parts.append(f'<div class="meta">{escape(meta)}</div>')
-    if message:
-        parts.append(f'<div class="toc-note">{inline(message)}</div>')
     visible = 0
     for page in document.pages:
         if any(not block.hidden for block in page.blocks):
             visible += sum(1 for block in page.blocks if not block.hidden)
         parts.append(_render_page(page, document, status, asset_base, zoom))
     if not visible:
-        parts.append('<div class="toc-note">未提取到可显示的文本。若为扫描版 PDF，请配置本地 OCR 后重新解析。</div>')
+        parts.append('<div class="toc-note">未提取到正文。扫描件可启用 OCR 后重新解析。</div>')
     parts.append("</div></div>")
     if katex_css.is_file() and katex_js.is_file() and auto_js.is_file():
         parts.extend(
@@ -570,18 +546,6 @@ _MATH_AND_ZOOM_JS = r"""
 """
 
 
-def _empty_state(title: str, subtitle: str, dark: bool = False) -> str:
-    return f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head>
-    <body class="{'dark' if dark else ''}">
-    <style>{_CSS}{_DARK_CSS if dark else ''}
-    .empty {{ margin-top:14vh; text-align:center; color:#8A8E88; }}
-    .empty h2 {{ border:none; font-size:17pt; color:#6F746F; }}
-    body.dark .empty, body.dark .empty h2 {{ color:#A3ACB6; }}
-    </style>
-    <div class='empty'><h2>{escape(title)}</h2>{f'<p>{escape(subtitle)}</p>' if subtitle else ''}</div>
-    </body></html>"""
-
-
 _CHAT_CSS = """
 body { color:#20262E; }
 .msg { margin:9px 0 14px 0; }
@@ -598,21 +562,17 @@ body { color:#20262E; }
          margin:6px 0; font-size:9.5pt; }
 .cursor { color:#0F766E; font-weight:bold; }
 .meta { color:#9A9E98; font-size:8pt; margin-top:4px; }
-.empty { margin-top:12vh; text-align:center; color:#969A94; padding:18px; }
-.empty h3 { color:#6F746F; font-size:13pt; }
-.chips { color:#8A8E88; font-size:8pt; }
 """
 
 _CHAT_DARK_CSS = """
 body.dark { color:#E8EBEF; background:#12161B; }
-body.dark .role, body.dark .meta, body.dark .chips { color:#A3ACB6; }
+body.dark .role, body.dark .meta { color:#A3ACB6; }
 body.dark .user .bubble { background:#183C39; border-color:#2A5F59; }
 body.dark .assistant .bubble { background:#1B2027; border-color:#303841; }
 body.dark .bubble pre { background:#222831; border-color:#303841; }
 body.dark .bubble code { background:#2A313A; }
 body.dark .quote { background:#222831; border-left-color:#FBBF24; color:#D8DEE5; }
 body.dark .cursor { color:#5EEAD4; }
-body.dark .empty, body.dark .empty h3 { color:#A3ACB6; }
 body.dark a { color:#5EEAD4; }
 """
 
@@ -627,11 +587,6 @@ def render_chat_messages(
         dark = theme_module.is_dark()
     extra = _CHAT_DARK_CSS if dark else ""
     body_class = "dark" if dark else ""
-    if not messages:
-        return (
-            f"<html><head><meta charset='utf-8'><style>{_CHAT_CSS}{extra}</style></head>"
-            f"<body class='{body_class}'><div class='empty'><h3>基于全文提问</h3></div></body></html>"
-        )
     parts = [
         f"<html><head><meta charset='utf-8'><style>{_CHAT_CSS}{extra}</style></head>"
         f"<body class='{body_class}'>",

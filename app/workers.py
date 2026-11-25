@@ -82,8 +82,22 @@ class PrepareWorker(QThread):
                     self.progress.emit("ocr", len(pages), len(pages), "OXR 扫描页解析完成")
             if self._cancelled.is_set():
                 raise ExtractionCancelled()
-            # Standalone formula blocks are already embedded as original
-            # page crops.  OXR LaTeX is only needed for inline math spans.
+            # Refine standalone formula crops on pages with native coordinates.
+            try:
+                layout = service.locate_formulas(
+                    self.pdf_path,
+                    [page.number for page in document.pages if not page.ocr_done],
+                )
+                service.apply_layout_formulas(
+                    document,
+                    self.pdf_path,
+                    layout,
+                    cache.root / "assets",
+                )
+            except Exception as exc:
+                log.warning("OXR layout detection skipped: %s", exc)
+            if self._cancelled.is_set():
+                raise ExtractionCancelled()
             service.enhance_inline_formulas(
                 document,
                 self.pdf_path,

@@ -13,6 +13,7 @@ import html
 import re
 import statistics
 import time
+from bisect import bisect_right
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -30,10 +31,11 @@ from ..models import (
     is_mostly_math,
     normalize_text,
 )
+from ..tables import parse_ocr_html_table, to_markdown
 
 log = get_logger("pdf.extractor")
 
-EXTRACTOR_VERSION = 5
+EXTRACTOR_VERSION = 9
 
 ProgressFn = Callable[[str, int, int, str], None]
 
@@ -42,6 +44,8 @@ _CAPTION_RE = re.compile(
     r"(?:[.\-]\d+)?(?:\s*[:：.\-–—|]\s*|\s+(?=(?-i:[A-Z\u4e00-\u9fff])))",
     re.IGNORECASE,
 )
+_TABLE_CAPTION_RE = re.compile(r"^\s*(?:tab(?:le)?\.?|表)\s*[A-Za-z]?\d+\s*[:：.\-–—]", re.I)
+_OCR_HTML_TABLE_RE = re.compile(r"(<table\b[^>]*>.*?</table\s*>)", re.I | re.S)
 _HEADING_NUM_RE = re.compile(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVX]+\.)\s+[A-Z\u4e00-\u9fff]")
 _KNOWN_HEADINGS = {
     "abstract",
@@ -76,10 +80,14 @@ _KNOWN_HEADINGS = {
     "致谢",
 }
 _MATH_CHARS = set("=+-*/^_{}[]()<>∑∫√∞≈≠≤≥±×÷·αβγδεζηθλμνξπρστφχψωΓΔΘΛΞΠΣΦΨΩ")
+_EQUATION_OPERATORS = set("=+-−*/^_<>∑∏∫√≈≠≡≤≥±×÷∈∪∥⊙→⇒·")
 _MATH_FONT_HINTS = (
     "cmmi",
     "cmsy",
     "cmex",
+    "txex",
+    "txmi",
+    "txsy",
     "symbol",
     "math",
     "stix",
@@ -139,13 +147,12 @@ def extract_document(
         title_block = _pick_title(raw_pages, raw_meta)
         _classify_blocks(raw_pages, body_size, title_block)
         for page in raw_pages:
-            page.blocks = _reading_order(page.blocks, page.width, page.height)
+            _merge_formula_fragments(page)
+            page.blocks = _layout_blocks(page.blocks, page.width)
             for order, block in enumerate(page.blocks, start=1):
                 block.id = f"p{page.number}_b{order}"
                 block.order = order
             page.words = _order_words(page.words, page.blocks)
-        _assign_columns(raw_pages)
-
         _mark_references(raw_pages)
         if asset_dir is not None:
             _extract_region_assets(doc, raw_pages, asset_dir)
@@ -265,58 +272,28 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
             )
     image_ratio = min(1.0, image_area / page_area)
 
-    tables: list[Block] = []
-    table_boxes: list[list[float]] = []
-    try:
-        finder = page.find_tables()
-        for table in getattr(finder, "tables", []):
-            data = table.extract()
-            markdown = _table_to_markdown(data)
-            if not markdown:
-                continue
-            bbox = [float(v) for v in table.bbox]
-            table_boxes.append(bbox)
-            table_meta: dict[str, object] = {
-                "rows": len(data),
-                "cols": max((len(r) for r in data), default=0),
-            }
-            grid = _table_grid(table, data)
-            if grid is not None:
-                table_meta["table"] = grid
-            tables.append(
-                Block(
-                    id="",
-                    page=page_number,
-                    order=0,
-                    kind="table",
-                    text=markdown,
-                    bbox=bbox,
-                    meta=table_meta,
-                )
-            )
-    except Exception:
-        log.debug("table detection failed on page %s", page_number, exc_info=True)
-
     blocks: list[Block] = []
-    words: list[Word] = []
     try:
-        raw_dict = page.get_text("dict")
+        raw_blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT).get("blocks", [])
     except Exception:
-        raw_dict = {"blocks": []}
+        raw_blocks = []
+    tables = _extract_tables(page, page_number, raw_blocks)
+    table_boxes = [block.bbox for block in tables]
 
-    for raw_block in raw_dict.get("blocks", []):
+    for raw_block in raw_blocks:
         if raw_block.get("type") != 0:
             continue
-        bbox = [float(v) for v in raw_block.get("bbox", (0, 0, 0, 0))]
-        if _overlaps_any(bbox, table_boxes, threshold=0.05) or _center_inside_any(bbox, table_boxes):
-            continue
+        bounds = pymupdf.Rect()
         lines: list[str] = []
         sizes: list[tuple[float, int]] = []
         bold_chars = 0
         total_chars = 0
         font_names: Counter[str] = Counter()
         span_meta: list[dict[str, object]] = []
-        for line in raw_block.get("lines", []):
+        for line_index, line in enumerate(raw_block.get("lines", [])):
+            line_box = line["bbox"]
+            if _center_inside_any(line_box, table_boxes):
+                continue
             spans = line.get("spans", [])
             if not spans:
                 continue
@@ -341,10 +318,12 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
                             "text": text,
                             "bbox": [round(float(v), 2) for v in span.get("bbox", (0, 0, 0, 0))],
                             "math": True,
+                            "line": line_index,
                         }
                     )
             line_text = "".join(pieces).strip()
             if line_text:
+                bounds |= pymupdf.Rect(line_box)
                 lines.append(line_text)
         if not lines:
             continue
@@ -365,7 +344,7 @@ def _extract_page(page: pymupdf.Page, page_number: int, asset_dir: Path | None =
             order=0,
             kind="paragraph",
             text=text,
-            bbox=bbox,
+            bbox=list(bounds),
             meta={
                 "font_size": round(font_size, 2),
                 "bold_ratio": round(bold_ratio, 3),
@@ -419,15 +398,42 @@ def _extract_region_assets(
             if block.meta.get("asset"):
                 continue
             x0, y0, x1, y1 = block.bbox
-            if x1 - x0 < 8 or y1 - y0 < 8:
+            if x1 - x0 < 1 or y1 - y0 < 1:
                 continue
+            # Small single-line formulas are often only a few points high;
+            # pad them so they still become an image instead of falling back
+            # to KaTeX.
+            pad_x = max(3.0, (12.0 - (x1 - x0)) / 2.0)
+            pad_y = max(3.0, (10.0 - (y1 - y0)) / 2.0)
+            merged = bool(block.meta.get("merged_formula"))
+            if merged:
+                # Stretched TeX glyphs can extend outside their text-layer boxes.
+                pad_y = max(pad_y, 1.25 * float(block.meta.get("font_size", 0)))
             counters[block.kind] += 1
             relative = (
                 f"assets/p{page_data.number:03d}_{block.kind}{counters[block.kind]}.png"
             )
             target = asset_dir.parent / relative
             try:
-                rect = pymupdf.Rect(x0 - 2, y0 - 2, x1 + 2, y1 + 2) & page.rect
+                top, bottom = y0 - pad_y, y1 + pad_y
+                if block.kind == "formula":
+                    for neighbor in page_data.blocks:
+                        left, upper, right, lower = neighbor.bbox
+                        if neighbor is block or min(x1, right) <= max(x0, left):
+                            continue
+                        if merged and neighbor.kind in {"paragraph", "heading", "title", "caption", "reference"}:
+                            if lower <= y0 + pad_y / 2:
+                                top = max(top, lower + 1)
+                            if upper >= y1 - pad_y / 2:
+                                bottom = min(bottom, upper - 1)
+                            continue
+                        if lower <= y0 + 4:
+                            top = max(top, min(y0, lower + 1))
+                        if upper >= y1 - 4:
+                            bottom = min(bottom, max(y1, upper - 1))
+                if bottom <= top:
+                    top, bottom = y0, y1
+                rect = pymupdf.Rect(x0 - pad_x, top, x1 + pad_x, bottom) & page.rect
                 if rect.is_empty:
                     continue
                 scale = min(3.0, 1800.0 / max(rect.width, rect.height, 1.0))
@@ -451,6 +457,8 @@ def _extract_region_assets(
                         "display_width": display,
                     }
                 )
+                if merged:
+                    block.meta["asset_bbox"] = list(rect)
             except Exception:
                 log.debug(
                     "could not extract %s region on page %s",
@@ -539,6 +547,124 @@ def _overlaps_any(bbox: list[float], boxes: list[list[float]], threshold: float 
     return False
 
 
+def _extract_tables(page: pymupdf.Page, number: int, raw_blocks: list[dict]) -> list[Block]:
+    tables: list[Block] = []
+
+    def collect(finder, region: pymupdf.Rect | None = None) -> bool:
+        found = False
+        for table in finder.tables:
+            bounds = pymupdf.Rect(table.bbox)
+            if region is not None:
+                if bounds.width < region.width * 0.75 or bounds.height < region.height * 0.65:
+                    continue
+                data = _table_rows_from_words(page, table, region)
+                bounds = region
+            else:
+                data = table.extract()
+            rows = [row for row in data if any(str(cell or "").strip() for cell in row)]
+            cols = max((len(row) for row in rows), default=0)
+            if not any(ch.isalnum() for row in rows for cell in row for ch in str(cell or "")):
+                continue
+            if region is not None and (len(rows) < 2 or cols < 2):
+                continue
+            found = True
+            bbox = list(bounds)
+            existing = [old for old in tables if _overlaps_any(old.bbox, [bbox], 0.65)]
+            if any(
+                region is None
+                or cols < old.meta["cols"]
+                or (cols == old.meta["cols"] and len(rows) <= old.meta["rows"])
+                for old in existing
+            ):
+                continue
+            meta = {"rows": len(rows), "cols": cols}
+            grid = _table_grid(table, data)
+            if grid is not None:
+                meta["table"] = grid
+            for old in existing:
+                tables.remove(old)
+            tables.append(Block("", number, 0, "table", _table_to_markdown(rows), bbox, meta=meta))
+        return found
+
+    try:
+        paths = page.get_drawings()
+        collect(page.find_tables(paths=paths))
+        for region in _captioned_table_regions(paths, raw_blocks):
+            clip = (region + (-2, -1, 2, 1)) & page.rect
+            if not collect(page.find_tables(clip=clip, strategy="text", paths=paths), region):
+                collect(page.find_tables(clip=clip, strategy="text", min_words_vertical=2, paths=paths), region)
+    except Exception:
+        log.debug("table detection failed on page %s", number, exc_info=True)
+    return tables
+
+
+def _table_rows_from_words(page: pymupdf.Page, table, region: pymupdf.Rect) -> list[list[str]]:
+    """Assign whole words to the inferred grid, including wide header labels."""
+    x_edges = sorted({round(cell[0], 2) for cell in table.cells if cell})[1:]
+    y_edges = [row.bbox[1] for row in table.rows][1:]
+    rows = [[[] for _ in range(len(x_edges) + 1)] for _ in range(len(y_edges) + 1)]
+    for x0, y0, x1, y1, word, *_ in page.get_text("words", clip=region, sort=True):
+        row = bisect_right(y_edges, (y0 + y1) / 2)
+        col = bisect_right(x_edges, (x0 + x1) / 2)
+        rows[row][col].append(word)
+    return [[" ".join(cell) for cell in row] for row in rows]
+
+
+def _captioned_table_regions(paths: list[dict], raw_blocks: list[dict]) -> list[pymupdf.Rect]:
+    """Bound three-line tables using collinear rules near a numbered caption."""
+    captions = [
+        pymupdf.Rect(block["bbox"])
+        for block in raw_blocks
+        if _TABLE_CAPTION_RE.match(" ".join(
+            span["text"] for line in block.get("lines", []) for span in line.get("spans", [])
+        ))
+    ]
+    if not captions:
+        return []
+    rules: list[tuple[float, float, float, float]] = []
+    for path in paths:
+        for item in path["items"]:
+            if item[0] == "l" and abs(item[1].y - item[2].y) < 0.5:
+                first, last = sorted((item[1], item[2]), key=lambda point: point.x)
+                if last.x - first.x >= 60:
+                    rules.append((first.x, first.y, last.x, float(path["width"] or 0)))
+            elif item[0] == "re" and 0 < item[1].height <= 2 and item[1].width >= 60:
+                rect = item[1]
+                rules.append((rect.x0, (rect.y0 + rect.y1) / 2, rect.x1, rect.height))
+    rules.sort(key=lambda rule: rule[1])
+
+    regions: list[pymupdf.Rect] = []
+    for caption in captions:
+        matches = []
+        for index, (x0, top, x1, thickness) in enumerate(rules):
+            centered = abs((x0 + x1) / 2 - (caption.x0 + caption.x1) / 2) <= caption.width * 0.45
+            if not centered and abs(x0 - caption.x0) > 15:
+                continue
+            below_caption = -1 <= top - caption.y1 <= 26
+            if not below_caption and not 0 < caption.y0 - top <= 380:
+                continue
+            has_inner_rule = False
+            for left, bottom, right, weight in rules[index + 1:]:
+                if bottom - top > 355:
+                    break
+                if bottom - top < 5 or abs(left - x0) > 3 or abs(right - x1) > 3:
+                    continue
+                if not has_inner_rule:
+                    has_inner_rule = True
+                    continue
+                if weight < thickness * 0.9 or bottom - top < 15:
+                    continue
+                gap = top - caption.y1 if below_caption else caption.y0 - bottom
+                if -1 <= gap <= 26:
+                    matches.append((not below_caption, abs(gap), pymupdf.Rect(x0, top, x1, bottom)))
+                break
+        if matches:
+            region = min(matches, key=lambda match: match[:2])[2]
+            if region not in regions:
+                regions.append(region)
+    return regions
+
+
 def _table_grid(table, data: list[list[object]]) -> dict[str, object] | None:
     """Derive a real cell grid (with rowspan/colspan) from PyMuPDF geometry."""
 
@@ -606,7 +732,7 @@ def _table_grid(table, data: list[list[object]]) -> dict[str, object] | None:
     return {"nrows": nrows, "ncols": ncols, "has_header": True, "cells": cells}
 
 
-def _center_inside_any(bbox: list[float], boxes: list[list[float]]) -> bool:
+def _center_inside_any(bbox: tuple[float, float, float, float], boxes: list[list[float]]) -> bool:
     cx = (bbox[0] + bbox[2]) / 2
     cy = (bbox[1] + bbox[3]) / 2
     return any(box[0] <= cx <= box[2] and box[1] <= cy <= box[3] for box in boxes)
@@ -635,12 +761,15 @@ def _table_to_markdown(rows: list[list[object]]) -> str:
 
 
 _PAGE_NUMBER_RE = re.compile(
-    r"^\s*(?:page\s*)?[-–—]?\s*\d{1,4}\s*(?:(?:/|of)\s*\d{1,4})?\s*[-–—]?\s*$",
+    r"(?:page\s*)?[-–—]?\s*\d{1,4}\s*(?:(?:/|of)\s*\d{1,4})?\s*[-–—]?|第\s*\d{1,4}\s*页",
     re.IGNORECASE,
 )
-_HEADER_BOILERPLATE_RE = re.compile(
-    r"(arxiv|preprint|biorxiv|medrxiv|downloaded from|copyright|all rights reserved|"
-    r"journal homepage|proceedings of|issn|doi\s*:|https?://|www\.)",
+_PREPRINT_STAMP_RE = re.compile(r"^(?:arxiv|biorxiv|medrxiv)\s*:\s*\d{4}\.\d{4,6}(?:v\d+)?\b", re.I)
+_PUBLICATION_NOTE_RE = re.compile(
+    r"^(?:(?:this (?:work|article) is )?licensed under (?:a |the )?creative commons\b|"
+    r"(?:©\s*\d{4}\s+)?copyright (?:©|\d{4}|held by)|all rights reserved\b|"
+    r"(?:\d+(?:st|nd|rd|th)\s+)?(?:international\s+)?(?:conference|symposium|workshop) on\b|"
+    r"(?:acm\s+)?(?:isbn|issn)\s+[\d-]+\b|downloaded from\s+https?://)",
     re.IGNORECASE,
 )
 _REFERENCE_HINT_RE = re.compile(r"^\s*(?:\[\d+\]|\d+\.\s+[A-Z])")
@@ -653,145 +782,73 @@ def _header_key(text: str) -> str:
     return " ".join(value.split())
 
 
-def _remove_headers_and_footers(pages: list[PageData], body_size: float = 10.0) -> None:
-    """Remove repeated/small page-edge blocks before any translation call."""
+def _margin_text(text: str, limit: int) -> bool:
+    return bool(
+        text and len(text) <= limit
+        and text.lower() not in _KNOWN_HEADINGS
+        and not _CAPTION_RE.match(text)
+        and not _REFERENCE_HINT_RE.match(text)
+        and not is_mostly_math(text)
+    )
 
-    if not pages:
-        return
+
+def _remove_headers_and_footers(pages: list[PageData], body_size: float = 10.0) -> None:
+    """Filter recurring running heads and identifiable publication marks."""
     body_size = body_size or 10.0
-    counts: Counter[str] = Counter()
+    occurrences: dict[tuple[str, str], set[int]] = {}
+    candidates: list[tuple[PageData, Block, str, str]] = []
+    removed: set[int] = set()
     for page in pages:
-        top_limit = 0.07 if page.number == 1 else 0.10
-        bottom_limit = 0.90
         for block in page.blocks:
-            if block.source == "ocr" or block.kind in {"figure", "table", "formula", "caption"}:
+            if block.source == "ocr" or block.kind in {"figure", "table", "formula", "caption", "title", "reference"}:
                 continue
             text = normalize_text(block.text)
-            if (
-                not text
-                or len(text) > 140
-                or _CAPTION_RE.match(text)
-                or _REFERENCE_HINT_RE.match(text)
-                or float(block.meta.get("math_font_ratio", 0) or 0) >= 0.35
-                or is_mostly_math(text)
-            ):
+            if not _margin_text(text, 320) or float(block.meta.get("math_font_ratio", 0) or 0) >= 0.35:
                 continue
-            y0, y1 = block.bbox[1], block.bbox[3]
-            if y1 <= page.height * top_limit or y0 >= page.height * bottom_limit:
-                counts[_header_key(text)] += 1
+            x0, y0, x1, y1 = block.bbox
+            if (x1 <= page.width * 0.08 or x0 >= page.width * 0.92) and _PREPRINT_STAMP_RE.match(text):
+                removed.add(id(block))
+                continue
+            if y1 <= page.height * 0.15:
+                side = "top"
+            elif y0 >= page.height * 0.80:
+                side = "bottom"
+            else:
+                continue
+            candidates.append((page, block, text, side))
+            if len(text) <= 240 and (side == "top" or y0 >= page.height * 0.90):
+                occurrences.setdefault((side, _header_key(text)), set()).add(page.number)
+
     repeated = {
         key
-        for key, count in counts.items()
-        if count >= max(2, int(len(pages) * 0.30))
+        for key, page_numbers in occurrences.items()
+        if len(page_numbers) >= max(2, int(len(pages) * 0.30))
     }
-
-    for page in pages:
+    for page, block, text, side in candidates:
+        y0, y1 = block.bbox[1], block.bbox[3]
+        top = side == "top"
         top_limit = 0.07 if page.number == 1 else 0.10
-        bottom_limit = 0.90
-        kept: list[Block] = []
-        for block in page.blocks:
-            if block.source == "ocr" or block.kind in {"figure", "table", "formula", "caption"}:
-                kept.append(block)
-                continue
-            text = normalize_text(block.text)
-            if (
-                not text
-                or len(text) > 140
-                or _CAPTION_RE.match(text)
-                or _REFERENCE_HINT_RE.match(text)
-                or float(block.meta.get("math_font_ratio", 0) or 0) >= 0.35
-                or is_mostly_math(text)
-            ):
-                kept.append(block)
-                continue
-            y0, y1 = block.bbox[1], block.bbox[3]
-            top = y1 <= page.height * top_limit
-            bottom = y0 >= page.height * bottom_limit
-            if not (top or bottom):
-                kept.append(block)
-                continue
-            key = _header_key(text)
-            page_number = bool(_PAGE_NUMBER_RE.fullmatch(text))
-            boiler = bool(_HEADER_BOILERPLATE_RE.search(text))
-            repeated_edge = key in repeated
-            font_size = float(block.meta.get("font_size", 0) or 0)
-            bold = float(block.meta.get("bold_ratio", 0) or 0)
-            small = font_size > 0 and font_size < body_size * 0.90
-            protected = (
-                block.kind in {"title", "reference"}
-                or (
-                    page.number == 1
-                    and top
-                    and (font_size >= body_size * 0.95 or bold >= 0.45 or len(text) >= 60)
-                )
-                or (block.kind == "heading" and (font_size >= body_size * 0.90 or bold >= 0.45))
-            )
-            tiny_first_edge = (
-                page.number == 1
-                and font_size > 0
-                and font_size < body_size * 0.85
-                and (
-                    (top and y1 <= page.height * 0.05)
-                    or (bottom and y0 >= page.height * 0.97)
-                )
-            )
-            small_top = small and top and len(text) <= 100
-            remove = (
-                page_number
-                or boiler
-                or repeated_edge
-                or (small_top and (page.number != 1 or tiny_first_edge))
-                or tiny_first_edge
-            )
-            if remove and not protected:
-                continue
-            kept.append(block)
-        page.blocks = kept
-
-
-def _remove_ocr_headers_footers(pages: list[PageData]) -> None:
-    """Conservative OCR pass: page edges and repeated first/last blocks only."""
-
-    ocr_pages = [p for p in pages if any(b.source == "ocr" for b in p.blocks)]
-    if not ocr_pages:
-        return
-    counts: Counter[str] = Counter()
-    for page in ocr_pages:
-        for block in _ocr_edge_blocks(page):
-            text = normalize_text(block.text)
-            if text and len(text) <= 140:
-                counts[_header_key(text)] += 1
-    repeated = {
-        key for key, count in counts.items() if count >= max(2, int(len(ocr_pages) * 0.5))
-    }
-    for page in ocr_pages:
-        edge = {id(b) for b in _ocr_edge_blocks(page)}
-        kept: list[Block] = []
-        for block in page.blocks:
-            if id(block) not in edge or block.kind in {"figure", "table", "formula", "caption"}:
-                kept.append(block)
-                continue
-            text = normalize_text(block.text)
-            if not text or len(text) > 140:
-                kept.append(block)
-                continue
-            page_number = bool(_PAGE_NUMBER_RE.fullmatch(text))
-            boiler = bool(_HEADER_BOILERPLATE_RE.search(text))
-            repeated_edge = _header_key(text) in repeated
-            if page.number == 1 and not (page_number or boiler or repeated_edge):
-                kept.append(block)
-                continue
-            if page_number or boiler or repeated_edge:
-                continue
-            kept.append(block)
-        page.blocks = kept
-
-
-def _ocr_edge_blocks(page: PageData) -> list[Block]:
-    candidates = [b for b in page.blocks if b.source == "ocr" and b.text.strip()]
-    if not candidates:
-        return []
-    return candidates[:2] + candidates[-2:]
+        near_edge = y1 <= page.height * top_limit if top else y0 >= page.height * 0.90
+        font_size = float(block.meta.get("font_size", 0) or 0)
+        bold = float(block.meta.get("bold_ratio", 0) or 0)
+        small = 0 < font_size < body_size * 0.90
+        protected = (
+            (page.number == 1 and top and (font_size >= body_size * 0.95 or bold >= 0.45 or len(text) >= 60))
+            or (block.kind == "heading" and (font_size >= body_size * 0.90 or bold >= 0.45))
+        )
+        tiny_first_edge = page.number == 1 and 0 < font_size < body_size * 0.85 and (
+            y1 <= page.height * 0.05 if top else y0 >= page.height * 0.97
+        )
+        if not protected and (
+            (len(text) <= 240 and (side, _header_key(text)) in repeated)
+            or (near_edge and (_PAGE_NUMBER_RE.fullmatch(text) or _PREPRINT_STAMP_RE.match(text)))
+            or (not top and (near_edge or small) and _PUBLICATION_NOTE_RE.match(text))
+            or (near_edge and small and top and len(text) <= 100 and page.number > 1)
+            or tiny_first_edge
+        ):
+            removed.add(id(block))
+    for page in pages:
+        page.blocks = [block for block in page.blocks if id(block) not in removed]
 
 
 def _estimate_body_size(pages: list[PageData]) -> float:
@@ -860,10 +917,12 @@ def _classify_blocks(pages: list[PageData], body_size: float, title_block: Block
             if _CAPTION_RE.match(text):
                 block.kind = "caption"
                 continue
-            if math_font >= 0.45 and len(text) <= 500:
-                block.kind = "formula"
-                continue
-            if is_mostly_math(text):
+            if (
+                _EQUATION_OPERATORS.intersection(text)
+                and any(ch.isalnum() for ch in text)
+                and (math_font >= 0.45 or len(re.findall(r"[A-Za-z]{3,}", text)) <= 3)
+                and (is_mostly_math(text) or (math_font >= 0.45 and len(text) <= 500))
+            ):
                 block.kind = "formula"
                 continue
             lower = text.lower().strip(" .:：")
@@ -899,6 +958,54 @@ def _classify_blocks(pages: list[PageData], body_size: float, title_block: Block
             candidates.sort(key=lambda b: (-float(b.meta.get("font_size", 0) or 0), b.bbox[1]))
             candidates[0].kind = "title"
             candidates[0].level = 1
+
+
+def _merge_formula_fragments(page: PageData) -> None:
+    """Keep adjacent fraction or matrix pieces in a single source crop."""
+    candidates = [
+        block for block in page.blocks
+        if block.kind == "formula" or (
+            block.kind == "paragraph"
+            and (
+                block.text in {",", ".", "→", "⇒"}
+                or all("\ue000" <= ch <= "\uf8ff" for ch in block.text)
+                or (
+                    len(block.text) <= 32
+                    and block.meta.get("math_font_ratio", 0) >= 0.45
+                    and not re.search(r"[A-Za-z]{3,}", block.text)
+                )
+            )
+        )
+    ]
+    source_order = {id(block): index for index, block in enumerate(candidates)}
+    removed: set[int] = set()
+    for block in candidates:
+        if block.kind != "formula" or id(block) in removed:
+            continue
+        bounds = pymupdf.Rect(block.bbox)
+        parts = [block]
+        while True:
+            neighbors = []
+            for other in candidates:
+                if other is block or id(other) in removed:
+                    continue
+                x0, y0, x1, y1 = other.bbox
+                overlap = min(bounds.y1, y1) - max(bounds.y0, y0)
+                gap = max(x0 - bounds.x1, bounds.x0 - x1)
+                if overlap >= min(bounds.height, y1 - y0) * 0.35 and gap <= 9:
+                    neighbors.append(other)
+            if not neighbors:
+                break
+            for other in neighbors:
+                bounds |= pymupdf.Rect(other.bbox)
+                removed.add(id(other))
+            parts.extend(neighbors)
+        if len(parts) > 1:
+            block.bbox = list(bounds)
+            block.text = _join_lines([part.text for part in sorted(parts, key=lambda part: source_order[id(part)])])
+            block.meta["merged_formula"] = True
+    if removed:
+        page.blocks = [block for block in page.blocks if id(block) not in removed]
 
 
 def _document_title(pages: list[PageData], meta: dict, source: Path) -> str:
@@ -952,71 +1059,49 @@ def _pages_requiring_ocr(pages: list[PageData], config: AppConfig) -> list[int]:
     return result
 
 
-def _assign_columns(pages: list[PageData]) -> None:
-    """Record the visual column of each block for layout-preserving rendering."""
-
-    for page in pages:
-        width = max(1.0, page.width)
-        regular = [
-            b
-            for b in page.blocks
-            if b.bbox[2] - b.bbox[0] < width * 0.68
-            and (b.bbox[2] - b.bbox[0]) > width * 0.18
-            and len(b.text.strip()) >= 40
-        ]
-        left = [b for b in regular if b.bbox[0] < width * 0.35]
-        right = [b for b in regular if b.bbox[0] > width * 0.50]
-        two_columns = len(left) >= 1 and len(right) >= 1 and len(regular) >= 2
-        if not two_columns:
-            for block in page.blocks:
-                block.meta["columns"] = 1
-                block.meta["column"] = 1
-            continue
-        for block in page.blocks:
-            block_width = block.bbox[2] - block.bbox[0]
-            full = block_width >= width * 0.68
-            if full:
-                column = 0
-            else:
-                column = 1 if (block.bbox[0] + block.bbox[2]) / 2 < width * 0.5 else 2
-            block.meta["columns"] = 2
-            block.meta["column"] = column
-
-
-def _reading_order(blocks: list[Block], page_width: float, page_height: float) -> list[Block]:
-    if len(blocks) <= 1:
-        return blocks
-    text_blocks = [b for b in blocks if b.kind != "figure" or b.bbox[2] - b.bbox[0] > 0]
-    left = [
+def _column_gutter(blocks: list[Block], page_width: float) -> float | None:
+    """Find a central gutter supported by sustained, parallel body text."""
+    body = [
         b
-        for b in text_blocks
-        if b.bbox[0] < page_width * 0.35
-        and (b.bbox[2] - b.bbox[0]) < page_width * 0.56
-        and (b.bbox[2] - b.bbox[0]) > page_width * 0.18
-        and len(b.text.strip()) >= 40
+        for b in blocks
+        if not b.hidden
+        and b.kind in {"paragraph", "reference"}
+        and page_width * 0.18 <= b.bbox[2] - b.bbox[0] <= page_width * 0.56
+        and len(b.text.strip()) >= 65
     ]
-    right = [
-        b
-        for b in text_blocks
-        if b.bbox[0] > page_width * 0.50
-        and (b.bbox[2] - b.bbox[0]) < page_width * 0.56
-        and (b.bbox[2] - b.bbox[0]) > page_width * 0.18
-        and len(b.text.strip()) >= 40
-    ]
-    two_columns = len(left) >= 1 and len(right) >= 1
-    if not two_columns:
+    left = [b for b in body if b.bbox[0] < page_width * 0.36 and b.bbox[2] <= page_width * 0.525]
+    right = [b for b in body if b.bbox[0] >= page_width * 0.475 and b.bbox[2] > page_width * 0.64]
+    best_overlap = page_width * 0.03
+    gutter = None
+    for a in left:
+        for b in right:
+            gap = b.bbox[0] - a.bbox[2]
+            overlap = min(a.bbox[3], b.bbox[3]) - max(a.bbox[1], b.bbox[1])
+            if page_width * 0.008 <= gap <= page_width * 0.12 and overlap > best_overlap:
+                best_overlap = overlap
+                gutter = (a.bbox[2] + b.bbox[0]) / 2
+    return gutter
+
+
+def _layout_blocks(blocks: list[Block], page_width: float) -> list[Block]:
+    """Use the same column assignments for reading order and rendering."""
+    gutter = _column_gutter(blocks, page_width)
+    if gutter is None:
+        for block in blocks:
+            block.meta.update(columns=1, column=1)
         return sorted(blocks, key=lambda b: (round(b.bbox[1], 1), b.bbox[0]))
 
     full: list[Block] = []
     regular: list[Block] = []
+    margin = page_width * 0.008
     for block in blocks:
-        width = block.bbox[2] - block.bbox[0]
-        if width >= page_width * 0.68 or (block.bbox[0] < page_width * 0.18 and block.bbox[2] > page_width * 0.82):
+        x0, _, x1, _ = block.bbox
+        if x0 < gutter - margin and x1 > gutter + margin:
+            block.meta.update(columns=2, column=0)
             full.append(block)
         else:
+            block.meta.update(columns=2, column=1 if (x0 + x1) / 2 <= gutter else 2)
             regular.append(block)
-    if not full:
-        return _sort_columns(regular, page_width)
 
     full.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
     result: list[Block] = []
@@ -1026,19 +1111,16 @@ def _reading_order(blocks: list[Block], page_width: float, page_height: float) -
         band = [b for b in remaining if (b.bbox[1] + b.bbox[3]) / 2 < limit]
         if band:
             band_set = set(id(b) for b in band)
-            result.extend(_sort_columns(band, page_width))
+            result.extend(_sort_columns(band))
             remaining = [b for b in remaining if id(b) not in band_set]
         result.append(separator)
     if remaining:
-        result.extend(_sort_columns(remaining, page_width))
+        result.extend(_sort_columns(remaining))
     return result
 
 
-def _sort_columns(blocks: list[Block], page_width: float) -> list[Block]:
-    left = [b for b in blocks if (b.bbox[0] + b.bbox[2]) / 2 <= page_width * 0.5]
-    right = [b for b in blocks if (b.bbox[0] + b.bbox[2]) / 2 > page_width * 0.5]
-    key = lambda b: (round(b.bbox[1], 1), b.bbox[0])
-    return sorted(left, key=key) + sorted(right, key=key)
+def _sort_columns(blocks: list[Block]) -> list[Block]:
+    return sorted(blocks, key=lambda b: (b.meta["column"], round(b.bbox[1], 1), b.bbox[0]))
 
 
 def _all_blocks(pages: list[PageData]):
@@ -1047,12 +1129,69 @@ def _all_blocks(pages: list[PageData]):
 
 
 def parse_ocr_text(text: str, page: PageData) -> list[Block]:
-    """Convert PaddleOCR-VL Markdown-ish output into structured blocks."""
+    """Convert page OCR text and HTML tables into structured blocks."""
 
-    text = _clean_ocr_text(text)
-    if not text:
-        return []
-    lines = text.splitlines()
+    return _parse_ocr_lines(_ocr_lines(text), page)
+
+
+def _ocr_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for index, part in enumerate(_OCR_HTML_TABLE_RE.split(text or "")):
+        if index % 2:
+            lines.append(part)
+        else:
+            lines.extend(_clean_ocr_text(part).splitlines())
+    return lines
+
+
+def _ocr_margin_lines(lines: list[str]) -> list[tuple[str, list[tuple[int, str]]]]:
+    # Whole-page OCR returns Markdown without coordinates. Only inspect the
+    # first and last few lines, stopping at captions, formulas and tables.
+    nonempty = [(index, line.strip()) for index, line in enumerate(lines) if line.strip()]
+    limit = min(2, len(nonempty) // 2)
+    margins: list[tuple[str, list[tuple[int, str]]]] = []
+    for side, edge in (("top", nonempty[:limit]), ("bottom", list(reversed(nonempty))[:limit])):
+        candidates = []
+        for index, line in edge:
+            if line.startswith(("<", "$", "\\", "```")) or "|" in line:
+                break
+            text = normalize_text(re.sub(r"^#{1,6}\s+", "", line).strip("*"))
+            if not _margin_text(text, 240):
+                break
+            candidates.append((index, text))
+        margins.append((side, candidates))
+    return margins
+
+
+def _filter_ocr_margins(page_texts: dict[int, str]) -> dict[int, list[str]]:
+    lines_by_page = {number: _ocr_lines(text) for number, text in page_texts.items()}
+    margins = {number: _ocr_margin_lines(lines) for number, lines in lines_by_page.items()}
+    occurrences: dict[tuple[str, str], set[int]] = {}
+    for number, edges in margins.items():
+        for side, candidates in edges:
+            for _, text in candidates:
+                occurrences.setdefault((side, _header_key(text)), set()).add(number)
+
+    min_pages = max(2, int(len(page_texts) * 0.30))
+    for number, edges in margins.items():
+        removed: set[int] = set()
+        for side, candidates in edges:
+            for index, text in candidates:
+                running_text = len(occurrences[(side, _header_key(text))]) >= min_pages
+                if (
+                    _PAGE_NUMBER_RE.fullmatch(text)
+                    or _PREPRINT_STAMP_RE.match(text)
+                    or (side == "bottom" and _PUBLICATION_NOTE_RE.match(text))
+                    or (running_text and (number != 1 or side == "bottom"))
+                ):
+                    removed.add(index)
+                else:
+                    break
+        lines_by_page[number] = [line for index, line in enumerate(lines_by_page[number]) if index not in removed]
+    return lines_by_page
+
+
+def _parse_ocr_lines(lines: list[str], page: PageData) -> list[Block]:
     blocks: list[Block] = []
     index = 0
     paragraph: list[str] = []
@@ -1093,6 +1232,17 @@ def parse_ocr_text(text: str, page: PageData) -> list[Block]:
             index += 1
             continue
 
+        if _OCR_HTML_TABLE_RE.fullmatch(stripped):
+            flush_paragraph()
+            parsed = parse_ocr_html_table(stripped)
+            if parsed:
+                rows, grid = parsed
+                block = _ocr_block(page, "table", to_markdown(rows))
+                block.meta.update({"rows": grid["nrows"], "cols": grid["ncols"], "table": grid})
+                blocks.append(block)
+            index += 1
+            continue
+
         if stripped.startswith("```"):
             flush_paragraph()
             index += 1
@@ -1106,12 +1256,12 @@ def parse_ocr_text(text: str, page: PageData) -> list[Block]:
                 blocks.append(_ocr_block(page, "formula" if _looks_like_formula(value) else "paragraph", value))
             continue
 
-        if stripped in {"$$", "\\["} or (stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) > 4):
-            if stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) > 4:
-                flush_paragraph()
-                blocks.append(_ocr_block(page, "formula", stripped[2:-2].strip()))
-                index += 1
-                continue
+        if re.fullmatch(r"\$\$.+\$\$|\\\[.+\\\]", stripped):
+            flush_paragraph()
+            blocks.append(_ocr_block(page, "formula", stripped[2:-2]))
+            index += 1
+            continue
+        if stripped in {"$$", "\\["}:
             flush_paragraph()
             index += 1
             formula: list[str] = []
@@ -1213,9 +1363,13 @@ def _clean_ocr_text(text: str) -> str:
     text = str(text or "")
     text = re.sub(r"<\|[^|>]*\|>", "", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     if "<" in text and ">" in text:
-        text = re.sub(r"<[^>\n]{1,80}>", "", text)
+        text = re.sub(
+            r"(\$\$.*?\$\$|\\\[.*?\\\]|\\\(.*?\\\)|\$[^$\n]+\$)|(<br\s*/?>)|</?[A-Za-z][^>\n]{0,79}>",
+            lambda match: match[1] or ("\n" if match[2] else ""),
+            text,
+            flags=re.S | re.I,
+        )
     text = html.unescape(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"^```(?:markdown|md|text)?\s*\n", "", text.strip(), flags=re.IGNORECASE)
@@ -1235,23 +1389,23 @@ def merge_ocr_pages(
 ) -> DocumentStructure:
     """Replace OCR-target pages with structured OCR blocks and re-index."""
 
+    cleaned_pages = _filter_ocr_margins(page_texts)
     for page in structure.pages:
-        if page.number not in page_texts:
+        if page.number not in cleaned_pages:
             continue
-        text = page_texts[page.number]
-        blocks = parse_ocr_text(text, page)
+        blocks = _parse_ocr_lines(cleaned_pages[page.number], page)
         if not blocks:
             page.ocr_done = True
             page.ocr_engine = engine
             page.needs_ocr = False
             continue
-        page.blocks = blocks
+        page.blocks = _layout_blocks(blocks, page.width)
         # Keep any native word boxes so a force-OCR run does not remove the
         # PDF selection affordance; scanned pages simply have none.
         page.ocr_done = True
         page.ocr_engine = engine
         page.needs_ocr = False
-        page.text_chars = len(text.strip())
+        page.text_chars = len(page_texts[page.number].strip())
 
     done_pages = [p.number for p in structure.pages if p.ocr_done]
     required = sorted(set(structure.ocr_summary.get("required_pages") or []) | set(page_texts))
@@ -1265,10 +1419,8 @@ def merge_ocr_pages(
         }
     )
     structure.ocr_summary.pop("error", None)
-    _remove_ocr_headers_footers(structure.pages)
     structure.reindex()
     _mark_references(structure.pages)
-    _assign_columns(structure.pages)
     return structure
 
 

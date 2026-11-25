@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         self._render_timer.setInterval(400)
         self._render_timer.timeout.connect(self._flush_translation)
 
-        self.setWindowTitle("EasyPaper · 本地论文阅读翻译问答")
+        self.setWindowTitle("EasyPaper")
         icon_path = resource_path("easypaper.ico")
         if icon_path.is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -86,7 +86,6 @@ class MainWindow(QMainWindow):
         self._install_shortcuts()
         self._update_actions()
         self._update_api_chip()
-        self._update_state_chip()
         self._set_middle_html(render_document(None), reset=True)
         self.chat.set_document_ready(False)
         try:
@@ -137,8 +136,8 @@ class MainWindow(QMainWindow):
         self.splitter.setHandleWidth(8)
         root.addWidget(self.splitter, 1)
 
-        left_panel, left_body, left_header, left_footer = self._make_panel("原文 PDF", "")
-        self.page_label = QLabel("第 0 / 0 页")
+        left_panel, left_body, left_header, left_footer = self._make_panel("原文 PDF")
+        self.page_label = QLabel()
         self.page_label.setObjectName("Muted")
         left_header.addWidget(self.page_label, 0)
         self.pdf_view = PdfViewer(left_body)
@@ -153,7 +152,7 @@ class MainWindow(QMainWindow):
         self.settings_button = QToolButton()
         self.settings_button.setObjectName("GearButton")
         self.settings_button.setText("⚙  设置")
-        self.settings_button.setToolTip("OpenAI 接口、OCR 与翻译设置 (Ctrl+,)")
+        self.settings_button.setToolTip("设置 (Ctrl+,)")
         self.settings_button.clicked.connect(self.open_settings)
         left_footer.addWidget(self.settings_button, 0)
         left_footer.addSpacing(6)
@@ -161,21 +160,18 @@ class MainWindow(QMainWindow):
         left_footer.addWidget(self.left_zoom_label, 0)
         self.splitter.addWidget(left_panel)
 
-        middle_panel, middle_body, middle_header, middle_footer = self._make_panel("全文翻译", "")
+        middle_panel, middle_body, middle_header, middle_footer = self._make_panel("译文")
         self.translate_button = QPushButton("重新翻译")
         self.translate_button.setToolTip("忽略本地翻译缓存，重新调用 AI")
         self.translate_button.clicked.connect(self.retranslate)
         self.review_button = QPushButton("审查")
-        self.review_button.setToolTip("调用 AI 整体审查译文，去除页眉、页脚等冗余信息")
+        self.review_button.setToolTip("检查页眉、页脚等冗余内容")
         self.review_button.clicked.connect(
             lambda: self._maybe_start_review(force=True, manual=True)
         )
         self.export_button = QPushButton("导出")
         self.export_button.setToolTip("导出 Markdown 译文")
         self.export_button.clicked.connect(self.export_markdown)
-        self.middle_state_chip = QLabel("未打开")
-        self.middle_state_chip.setObjectName("Chip")
-        middle_header.addWidget(self.middle_state_chip, 0)
         middle_header.addWidget(self.review_button, 0)
         middle_header.addWidget(self.translate_button, 0)
         middle_header.addWidget(self.export_button, 0)
@@ -199,7 +195,7 @@ class MainWindow(QMainWindow):
             )
             self.translation_view.ctrl_wheel.connect(self._on_middle_zoom)
         middle_body.layout().addWidget(self.translation_view, 1)
-        self.translation_status = QLabel("等待打开 PDF")
+        self.translation_status = QLabel()
         self.translation_status.setObjectName("Muted")
         self.translation_status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.translation_progress = QProgressBar()
@@ -215,13 +211,14 @@ class MainWindow(QMainWindow):
         middle_footer.addWidget(self.middle_zoom_label, 0)
         self.splitter.addWidget(middle_panel)
 
-        right_panel, right_body, right_header, right_footer = self._make_panel("AI 问答", "")
+        right_panel, right_body, right_header, right_footer = self._make_panel("AI 问答")
         self.chat_hide_button = QToolButton()
         self.chat_hide_button.setObjectName("ChatHide")
         self.chat_hide_button.setText("‹")
         self.chat_hide_button.setToolTip("收起 AI 问答")
         right_header.insertWidget(0, self.chat_hide_button)
         self.new_chat_button = QPushButton("新对话")
+        self.new_chat_button.setToolTip("清空当前对话和引用")
         self.new_chat_button.clicked.connect(self._new_chat)
         right_header.addWidget(self.new_chat_button, 0)
         chat_thinking_label = QLabel("思考")
@@ -231,7 +228,7 @@ class MainWindow(QMainWindow):
         for label, value in REASONING_OPTIONS:
             self.chat_thinking.addItem(label, value)
         self.chat_thinking.setFixedWidth(104)
-        self.chat_thinking.setToolTip("AI 对话的模型思考强度；强度越高通常越慢、越贵")
+        self.chat_thinking.setToolTip("较高的思考强度可能增加耗时和费用")
         index = self.chat_thinking.findData(self.config.chat.reasoning_effort)
         self.chat_thinking.setCurrentIndex(index if index >= 0 else 0)
         self.chat_thinking.currentIndexChanged.connect(self._on_chat_thinking_changed)
@@ -278,37 +275,36 @@ class MainWindow(QMainWindow):
         titles.setSpacing(1)
         app_title = QLabel("EasyPaper")
         app_title.setObjectName("AppTitle")
-        self.doc_title = QLabel("本地论文阅读 · 全文翻译 · AI 问答")
+        self.doc_title = QLabel()
         self.doc_title.setObjectName("AppSubtitle")
         self.doc_title.setMaximumWidth(760)
+        self.doc_title.hide()
         titles.addWidget(app_title)
         titles.addWidget(self.doc_title)
         layout.addLayout(titles, 1)
 
         self.api_chip = QLabel("API 未配置")
         self.api_chip.setObjectName("WarmChip")
-        self.api_chip.setToolTip("点击左下角齿轮配置 OpenAI 兼容接口")
+        self.api_chip.setToolTip("在设置中配置 AI 接口")
         layout.addWidget(self.api_chip, 0)
         self.open_button = QPushButton("打开 PDF")
         self.open_button.setObjectName("Primary")
-        self.open_button.setToolTip("打开本地 PDF (Ctrl+O)")
+        self.open_button.setToolTip("打开 PDF (Ctrl+O)")
         self.open_button.clicked.connect(self.open_pdf_dialog)
         layout.addWidget(self.open_button, 0)
         self.reparse_button = QPushButton("重新解析")
-        self.reparse_button.setToolTip("重新执行 PDF 结构化解析 / OCR，可保留已有译文缓存")
+        self.reparse_button.setToolTip("重新解析 PDF 和执行 OCR")
         self.reparse_button.clicked.connect(self.reparse)
         layout.addWidget(self.reparse_button, 0)
         self.import_project_button = QPushButton("导入项目")
-        self.import_project_button.setToolTip("导入包含 PDF、译文、图片和问答记录的 EasyPaper 项目包")
         self.import_project_button.clicked.connect(self.import_project)
         layout.addWidget(self.import_project_button, 0)
         self.export_project_button = QPushButton("导出项目")
-        self.export_project_button.setToolTip("导出 PDF、译文、公式/表格图片和问答记录")
         self.export_project_button.clicked.connect(self.export_project)
         layout.addWidget(self.export_project_button, 0)
         return bar
 
-    def _make_panel(self, title: str, hint: str):
+    def _make_panel(self, title: str):
         panel = QFrame()
         panel.setObjectName("Panel")
         panel_layout = QVBoxLayout(panel)
@@ -323,12 +319,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel(title)
         title_label.setObjectName("PanelTitle")
         header_layout.addWidget(title_label, 0)
-        hint_label = QLabel(hint)
-        hint_label.setObjectName("PanelHint")
-        hint_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        header_layout.addWidget(hint_label, 1)
-        if not hint:
-            hint_label.hide()
+        header_layout.addStretch(1)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -346,21 +337,15 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         bar = self.statusBar()
         bar.setSizeGripEnabled(False)
-        self.status_message = QLabel("就绪")
+        self.status_message = QLabel()
         self.status_message.setObjectName("Muted")
         bar.addWidget(self.status_message, 1)
-        self.cache_label = QLabel(f"缓存 {HOME / 'cache'}")
-        self.cache_label.setObjectName("Muted")
-        bar.addPermanentWidget(self.cache_label, 0)
         self.status_progress = QProgressBar()
         self.status_progress.setFixedWidth(150)
         self.status_progress.setFixedHeight(6)
         self.status_progress.setTextVisible(False)
         self.status_progress.hide()
         bar.addPermanentWidget(self.status_progress, 0)
-        self.api_status = QLabel("API: 未配置")
-        self.api_status.setObjectName("Muted")
-        bar.addPermanentWidget(self.api_status, 0)
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_pdf_dialog)
@@ -397,16 +382,13 @@ class MainWindow(QMainWindow):
         self._translation_note = ""
         self.pdf_view.clear_document()
         self.chat.reset_document()
-        self._set_middle_html(
-            render_document(None, message="正在读取 PDF、计算指纹并生成结构化缓存…"),
-            reset=True,
-        )
-        self.translation_status.setText("正在准备 PDF…")
+        self._set_middle_html(render_document(None), reset=True)
+        self.translation_status.clear()
         self.doc_title.setText(self.pdf_path.name)
+        self.doc_title.show()
         self.setWindowTitle(f"{self.pdf_path.stem} · EasyPaper")
-        self.page_label.setText("第 0 / 0 页")
+        self.page_label.clear()
         self._update_actions()
-        self._update_state_chip()
         self._begin_prepare(force_reparse=False)
 
     def _restore_pending_project(self) -> None:
@@ -467,7 +449,6 @@ class MainWindow(QMainWindow):
 
     def _on_prepare_progress(self, phase: str, current: int, total: int, message: str) -> None:
         self._set_status(message)
-        self.translation_status.setText(message)
         self._show_progress(total > 1, current, total)
 
     def _on_prepare_ready(self, document: DocumentStructure, cache: DocumentCache, targets: list) -> None:
@@ -486,16 +467,11 @@ class MainWindow(QMainWindow):
         self.chat.set_document_ready(True)
         if self._pending_project is not None:
             self._restore_pending_project()
-        stats = document.stats()
-        self.cache_label.setText(f"缓存 {cache.root.name} · {stats['blocks']} 块")
-        self._set_status(
-            f"已载入：{document.page_count} 页 · {stats['translatable']} 个可译块 · "
-            f"{stats['tables']} 表格 · {stats['formulas']} 公式"
-        )
+        self._set_status("")
         self._update_actions()
         if targets:
             self._set_status(
-                f"OXR 预处理未完成 {len(targets)} 个扫描页；可重新解析或检查 OCR 设置。"
+                f"{len(targets)} 个扫描页待识别。请检查 OCR 设置后重新解析。"
             )
         self._load_translation_and_start()
 
@@ -528,36 +504,28 @@ class MainWindow(QMainWindow):
         self._update_actions()
         if not translatable:
             self._translation_state = "done"
-            self._translation_note = "未发现需要翻译的正文块。"
-            self._update_state_chip()
+            self._translation_note = "没有可翻译的正文"
             self.translation_status.setText(self._translation_note)
             self._render_translation(reset=True)
             return
         if not missing:
             meta = self.cache.translation_meta(self.document) or {}
             if meta.get("complete"):
-                note = f"已载入本地翻译缓存（{len(self.translations)} 块）"
+                note = "已载入译文"
             else:
-                note = f"已载入部分翻译缓存（{len(self.translations)} 块）"
+                note = "已载入部分译文"
             self._translation_state = "done" if meta.get("complete", True) else "partial"
             self._translation_note = note
-            self._update_state_chip()
             self.translation_status.setText(note)
             self._render_translation(reset=True)
-            self._set_status(note)
             if meta.get("complete", True):
                 QTimer.singleShot(120, self._maybe_start_review)
             return
         if not self.config.api_ready:
             self._translation_state = "error"
-            self._translation_note = (
-                "尚未配置 AI 接口：点击左下角“设置”填写 base_url、API Key 与模型，"
-                "然后点击“重新翻译”。"
-            )
-            self._update_state_chip()
-            self.translation_status.setText("等待配置 AI 接口")
+            self._translation_note = "在设置中配置 AI 接口后翻译"
+            self.translation_status.setText(self._translation_note)
             self._render_translation(reset=True)
-            self._set_status("请先配置 OpenAI 兼容接口")
             return
         self._start_translation(force=False)
 
@@ -568,8 +536,8 @@ class MainWindow(QMainWindow):
             return
         if not self.config.api_ready:
             self._translation_state = "error"
-            self._translation_note = "API 未配置，无法翻译。请打开左下角设置。"
-            self._update_state_chip()
+            self._translation_note = "在设置中配置 AI 接口后翻译"
+            self.translation_status.setText(self._translation_note)
             self._render_translation()
             self.open_settings()
             return
@@ -584,8 +552,7 @@ class MainWindow(QMainWindow):
             self.document.apply_translations({})
         self._translation_running = True
         self._translation_state = "running"
-        self._translation_note = "正在调用 AI 分块翻译，界面可继续阅读和提问…"
-        self._update_state_chip()
+        self._translation_note = "翻译中…"
         self._update_actions()
         self.translation_status.setText(self._translation_note)
         self.translation_progress.show()
@@ -606,16 +573,13 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_translation_failed)
         worker.finished.connect(self._on_translation_worker_finished)
         worker.start()
-        self._set_status("AI 翻译已开始…")
 
     def _on_translation_progress(self, done: int, total: int, message: str) -> None:
         self._translation_note = message
-        self.translation_status.setText(message)
-        self._set_status(message)
+        self.translation_status.setText(f"翻译中 {done}/{total}")
         self.translation_progress.setRange(0, max(1, total))
         self.translation_progress.setValue(done)
         self.translation_progress.show()
-        self.middle_state_chip.setText(f"翻译中 {done}/{total}")
 
     def _on_translation_partial(self, mapping: dict) -> None:
         self.translations.update(mapping)
@@ -641,16 +605,14 @@ class MainWindow(QMainWindow):
         self._translation_state = "done" if complete else "partial"
         self._translation_note = note
         self.translation_progress.hide()
-        self._update_state_chip()
         self._update_actions()
         self.translation_status.setText(note)
         self._render_translation()
-        self._set_status(f"{note} · {len(self.translations)} 块译文已缓存")
         if not complete:
             QMessageBox.warning(
                 self,
                 "部分翻译未完成",
-                note + "\n\n已成功的译文已保存；网络或额度恢复后点击“重新翻译”会继续补齐。",
+                note + "\n\n已完成的译文已保存。",
             )
             return
         if self.config.translation.review_pass:
@@ -665,7 +627,6 @@ class MainWindow(QMainWindow):
         self._translation_state = "error"
         self._translation_note = f"翻译中断：{message}"
         self.translation_progress.hide()
-        self._update_state_chip()
         self._update_actions()
         self.translation_status.setText("翻译中断")
         self._render_translation()
@@ -705,7 +666,9 @@ class MainWindow(QMainWindow):
                 self.cache.save_structure(self.document)
             except Exception:
                 log.debug("could not save review summary", exc_info=True)
-            self._translation_note = "AI 审查：未发现页眉、页脚等冗余信息"
+            self._translation_note = "审查完成，译文无需调整"
+            if manual:
+                self.translation_status.setText(self._translation_note)
             self._render_translation()
             return
         worker = ReviewWorker(
@@ -719,8 +682,7 @@ class MainWindow(QMainWindow):
         self.review_button.setText("审查中…")
         self.review_button.setEnabled(False)
         self._update_actions()
-        self.translation_status.setText(f"AI 整体审查中（{len(candidates)} 个候选块）…")
-        self._set_status("正在调用 AI 审查译文并清理页面冗余信息…")
+        self.translation_status.clear()
         worker.finished_ok.connect(self._on_review_finished)
         worker.failed.connect(self._on_review_failed)
         worker.finished.connect(self._on_review_worker_finished)
@@ -736,12 +698,11 @@ class MainWindow(QMainWindow):
         except Exception:
             log.debug("could not save review result", exc_info=True)
         if count:
-            note = f"AI 审查完成：移除 {count} 个页眉/页脚等冗余块"
+            note = f"审查完成，已移除 {count} 处冗余内容"
         else:
-            note = "AI 审查完成：未发现需要删除的冗余信息"
+            note = "审查完成，译文无需调整"
         self._translation_note = note
         self.translation_status.setText(note)
-        self._set_status(note)
         self._render_translation()
         self._update_actions()
 
@@ -803,8 +764,6 @@ class MainWindow(QMainWindow):
             render_document(
                 self.document,
                 status,
-                self.config.llm.model,
-                self._translation_note,
                 asset_base=self.cache.root if self.cache else None,
                 zoom=1.0 if self._middle_is_web else self._middle_zoom,
             ),
@@ -833,11 +792,12 @@ class MainWindow(QMainWindow):
         self._update_api_chip()
         if self.document:
             if self._translation_state in {"error", "idle"} and not self._translation_running:
-                self._translation_note = "设置已保存，正在尝试翻译…"
                 self._load_translation_and_start()
             else:
-                self.translation_status.setText("设置已保存")
-                self._set_status("设置已保存（模型变化后请点击“重新翻译”以使用新模型）")
+                if (old_config.llm.base_url, old_config.llm.model) != (config.llm.base_url, config.llm.model):
+                    self._set_status("重新翻译以使用新的 AI 接口设置")
+                else:
+                    self._set_status("设置已保存")
                 if self.config.translation.review_pass and self._translation_state == "done":
                     QTimer.singleShot(100, self._maybe_start_review)
         else:
@@ -863,7 +823,7 @@ class MainWindow(QMainWindow):
         self.translations = {}
         self._translation_state = "idle"
         self._translation_note = "正在重新解析…"
-        self._update_state_chip()
+        self.translation_status.clear()
 
     # ----------------------------------------------------------------- export
     def export_markdown(self) -> None:
@@ -911,16 +871,7 @@ class MainWindow(QMainWindow):
                 target,
                 markdown=self._document_markdown(),
             )
-            self._set_status(
-                f"已导出项目：{result.path.name} · {result.translations} 块译文 · {result.assets} 张图片"
-            )
-            QMessageBox.information(
-                self,
-                "导出完成",
-                f"项目包已写入：\n{result.path}\n\n"
-                f"PDF + 结构块：{result.blocks}\n译文：{result.translations}\n"
-                f"图片：{result.assets}\n大小：{result.bytes / 1024 / 1024:.1f} MB",
-            )
+            self._set_status(f"已导出：{result.path.name}")
         except Exception as exc:
             QMessageBox.critical(self, "导出项目失败", str(exc))
         finally:
@@ -951,7 +902,7 @@ class MainWindow(QMainWindow):
             prepare_project_cache(bundle, self.config)
             self._pending_project = bundle
             self.load_pdf(bundle.pdf_path)
-            self._set_status("项目已导入，正在自动载入原文、译文和问答记录…")
+            self._set_status("正在打开项目…")
         except ProjectError as exc:
             self._pending_project = None
             QMessageBox.critical(self, "导入项目失败", str(exc))
@@ -1022,7 +973,6 @@ class MainWindow(QMainWindow):
     def _on_quote_requested(self, text: str, page: int) -> None:
         self.chat.attach_quote(text, page)
         self.chat.input.setFocus()
-        self._set_status("已引用选中原文，请输入问题后发送")
         self._focus_right_panel()
 
     def _on_ask_selection(self, text: str, page: int) -> None:
@@ -1046,7 +996,7 @@ class MainWindow(QMainWindow):
         if not self.config.api_ready:
             self.chat.begin_assistant()
             self.chat.finish_assistant(
-                error="尚未配置 AI 接口。请点击左下角“设置”填写 base_url、API Key 与模型后重试。"
+                error="请在设置中配置 AI 接口后重试。"
             )
             self.open_settings()
             return
@@ -1068,7 +1018,6 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_chat_worker_finished)
         self.chat.begin_assistant()
         self._focus_right_panel()
-        self._set_status("AI 正在基于全文回答…")
         worker.start()
 
     def _on_chat_finished(self, answer: str, meta: dict) -> None:
@@ -1076,16 +1025,9 @@ class MainWindow(QMainWindow):
         parts = []
         if meta.get("retrieval"):
             parts.append(f"全文检索 {meta.get('used', 0)}/{meta.get('chunks', 0)} 段")
-        else:
-            parts.append("基于全文")
         if meta.get("cancelled"):
             parts.append("已停止")
-        if meta.get("elapsed"):
-            parts.append(f"{meta['elapsed']}s")
-        if meta.get("tokens_est"):
-            parts.append(f"约 {meta['tokens_est']} tokens")
         self.chat.finish_assistant(meta=" · ".join(parts))
-        self._set_status("回答完成")
 
     def _on_chat_failed(self, message: str, meta: dict) -> None:
         self._chat_running = False
@@ -1157,29 +1099,12 @@ class MainWindow(QMainWindow):
         else:
             text = "API 未配置"
             name = "WarmChip"
-            tip = "点击左下角齿轮配置 OpenAI 兼容接口"
+            tip = "在设置中配置 AI 接口"
         self.api_chip.setText(text if len(text) <= 28 else text[:28] + "…")
         self.api_chip.setObjectName(name)
         self.api_chip.setToolTip(tip)
         self.api_chip.style().unpolish(self.api_chip)
         self.api_chip.style().polish(self.api_chip)
-        self.api_status.setText("API: 就绪" if self.config.api_ready else "API: 未配置")
-
-    def _update_state_chip(self) -> None:
-        texts = {
-            "idle": "未开始",
-            "ocr": "OCR 预处理",
-            "running": "翻译中",
-            "done": "已翻译",
-            "partial": "部分完成",
-            "error": "待处理",
-        }
-        text = texts.get(self._translation_state, "未开始")
-        self.middle_state_chip.setText(text)
-        name = "Chip" if self._translation_state in {"done"} else "WarmChip"
-        self.middle_state_chip.setObjectName(name)
-        self.middle_state_chip.style().unpolish(self.middle_state_chip)
-        self.middle_state_chip.style().polish(self.middle_state_chip)
 
     def _update_actions(self) -> None:
         has_doc = self.document is not None

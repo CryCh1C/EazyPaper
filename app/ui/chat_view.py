@@ -76,10 +76,6 @@ class ChatView(QWidget):
         self.hint = QLabel("")
         self.hint.setObjectName("Muted")
         bottom.addWidget(self.hint, 1)
-        self.clear_button = QPushButton("清空")
-        self.clear_button.setFixedHeight(28)
-        self.clear_button.clicked.connect(self.clear_conversation)
-        bottom.addWidget(self.clear_button, 0)
         self.send_button = QPushButton("发送")
         self.send_button.setObjectName("Primary")
         self.send_button.setFixedHeight(28)
@@ -169,7 +165,6 @@ class ChatView(QWidget):
         self._streaming = busy
         self.send_button.setEnabled(not busy and self._document_ready and bool(self.input.toPlainText().strip() or self._quote_text))
         self.input.setReadOnly(busy)
-        self.clear_button.setEnabled(not busy)
         self.hint.setText("AI 正在回答…" if busy else "")
         self._refresh()
 
@@ -263,7 +258,7 @@ class ChatView(QWidget):
             self.messages[-1]["content"] = (current + "\n\n" + error).strip()
         if meta:
             self.messages[-1]["meta"] = meta
-            self._meta = meta
+        self._meta = meta
         self._streaming = False
         self.set_busy(False)
         self._refresh()

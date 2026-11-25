@@ -173,7 +173,7 @@ def _qss() -> str:
         font-weight: 700;
         color: {c['ink']};
     }}
-    QLabel#PanelHint, QLabel#Muted {{
+    QLabel#Muted {{
         color: {c['muted']};
         font-size: 9pt;
     }}

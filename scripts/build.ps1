@@ -137,8 +137,8 @@ $ExeMb = [math]::Round((Get-Item $Exe).Length / 1MB, 1)
 $TotalMb = [math]::Round(((Get-Item $Exe).Length + (Get-ChildItem $Internal -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
 Write-Host "`nBUILD OK" -ForegroundColor Green
 Write-Host "  $Exe  (exe $ExeMb MB; runtime folder total $TotalMb MB)"
-Write-Host "  _internal\  PySide6/PyMuPDF/OpenAI/torch/transformers runtime (keep beside the exe)"
-Write-Host "  OCR         : OXR adapter embedded in app.ocr (torch/transformers in _internal)"
+Write-Host "  _internal\  PySide6/QtWebEngine/PyMuPDF/OpenAI runtime (~536 MB)"
+Write-Host "  OCR runtime : .venv\Scripts\python.exe + tools\oxr_worker.py (external, not in _internal)"
 Write-Host "  Model       : .\oxr (external)"
 Write-Host "  Config      : .\config.json"
 Write-Host "  Cache/logs  : .\cache, .\logs"

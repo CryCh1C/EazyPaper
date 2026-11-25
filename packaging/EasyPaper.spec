@@ -13,13 +13,23 @@ project_root = Path(SPECPATH).parent
 debug_build = os.environ.get("EASYPAPER_BUILD_DEBUG") == "1"
 onefile_build = os.environ.get("EASYPAPER_BUILD_ONEFILE") == "1"
 exe_name = "EasyPaperDebug" if debug_build else "EasyPaper"
+katex = project_root / "app" / "resources" / "katex"
+dfine = project_root / "tools" / "dfine_la"
 
 datas = [
     (str(project_root / "app" / "resources" / "easypaper.ico"), "app/resources"),
     (str(project_root / "app" / "resources" / "easypaper.png"), "app/resources"),
-    (str(project_root / "app" / "resources" / "katex"), "app/resources/katex"),
+    (str(katex / "katex.min.css"), "app/resources/katex"),
+    (str(katex / "katex.min.js"), "app/resources/katex"),
+    (str(katex / "README.md"), "app/resources/katex"),
+    (str(katex / "contrib" / "auto-render.min.js"), "app/resources/katex/contrib"),
     (str(project_root / "tools" / "oxr_worker.py"), "tools"),
 ]
+datas.extend((str(font), "app/resources/katex/fonts") for font in sorted((katex / "fonts").glob("*.woff2")))
+datas.extend(
+    (str(source), str(Path("tools/dfine_la") / source.relative_to(dfine).parent))
+    for source in sorted(dfine.rglob("*.py"))
+)
 
 hiddenimports = [
     "pymupdf",
@@ -113,6 +123,10 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+# Keep the Qt libraries used by WebEngine and omit the declarative UI modules.
+for toc in (a.datas, a.binaries):
+    toc[:] = [entry for entry in toc if not entry[0].replace("\\", "/").startswith("PySide6/qml/")]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

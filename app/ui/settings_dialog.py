@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import REASONING_OPTIONS, AppConfig
-from ..paths import CONFIG_PATH, CACHE_DIR, LOG_DIR
+from ..paths import CACHE_DIR, CONFIG_PATH, EXPORT_DIR, LOG_DIR
 from ..workers import ConnectionTestWorker
 from .theme import COLOR_OPTIONS, MODE_OPTIONS
 
@@ -47,20 +46,12 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(18, 16, 18, 14)
         root.setSpacing(12)
 
-        title = QLabel("设置")
-        title.setObjectName("AppTitle")
-        root.addWidget(title)
-        subtitle = QLabel(f"配置文件：{CONFIG_PATH} · 所有缓存位于 {CACHE_DIR} · 日志位于 {LOG_DIR}")
-        subtitle.setObjectName("Muted")
-        subtitle.setWordWrap(True)
-        root.addWidget(subtitle)
-
         tabs = QTabWidget()
         root.addWidget(tabs, 1)
         tabs.addTab(self._build_api_tab(), "AI 接口")
         tabs.addTab(self._build_ocr_tab(), "OCR 与翻译")
         tabs.addTab(self._build_appearance_tab(), "外观")
-        tabs.addTab(self._build_about_tab(), "关于 / 数据")
+        tabs.addTab(self._build_about_tab(), "本地数据")
 
         footer = QHBoxLayout()
         self.footer_hint = QLabel("")
@@ -80,14 +71,6 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 16, 14, 14)
         layout.setSpacing(10)
-
-        note = QLabel(
-            "支持 OpenAI、Azure OpenAI 兼容网关、DeepSeek、通义千问兼容模式、Ollama / LM Studio 等。"
-            "base_url 通常以 /v1 结尾。密钥只保存在本机 config.json。"
-        )
-        note.setObjectName("Muted")
-        note.setWordWrap(True)
-        layout.addWidget(note)
 
         form = QFormLayout()
         form.setHorizontalSpacing(14)
@@ -113,7 +96,7 @@ class SettingsDialog(QDialog):
         form.addRow("API Key", key_row)
 
         self.model = QLineEdit()
-        self.model.setPlaceholderText("例如 gpt-4o-mini / deepseek-chat / qwen2.5:14b")
+        self.model.setPlaceholderText("模型名称")
         form.addRow("模型", self.model)
 
         self.timeout = QSpinBox()
@@ -132,7 +115,7 @@ class SettingsDialog(QDialog):
         self.test_button = QPushButton("测试连接")
         self.test_button.clicked.connect(self._test_connection)
         test_row.addWidget(self.test_button)
-        self.test_status = QLabel("尚未测试")
+        self.test_status = QLabel()
         self.test_status.setWordWrap(True)
         self.test_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         test_row.addWidget(self.test_status, 1)
@@ -145,19 +128,11 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 16, 14, 14)
         layout.setSpacing(10)
-        note = QLabel(
-            "数字版 PDF 优先使用内嵌文字层；扫描页和公式由本地 OXR-1.0 在后台预处理线程中解析。"
-            "模型加载与推理不会占用 GUI 线程。"
-        )
-        note.setObjectName("Muted")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
         form = QFormLayout()
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(9)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.ocr_enabled = QCheckBox("启用本地 OCR")
+        self.ocr_enabled = QCheckBox("启用")
         form.addRow("OCR", self.ocr_enabled)
         self.ocr_mode = QComboBox()
         self.ocr_mode.addItem("自动（仅扫描页）", "auto")
@@ -195,17 +170,16 @@ class SettingsDialog(QDialog):
         self.ocr_batch = QSpinBox()
         self.ocr_batch.setRange(1, 4)
         self.ocr_batch.setSuffix(" 页/批")
-        self.ocr_batch.setToolTip("GPU 显存足够时批量识别可提高吞吐；显存不足会自动回退逐页。")
+        self.ocr_batch.setToolTip("显存不足时逐页识别")
         form.addRow("OCR 批量", self.ocr_batch)
-        self.ocr_prewarm = QCheckBox("启动后预加载 OCR 模型（隐藏首次模型加载等待）")
+        self.ocr_prewarm = QCheckBox("启动时加载模型")
         form.addRow("预加载", self.ocr_prewarm)
-        self.inline_latex = QCheckBox("行内短公式用 OXR 识别为 LaTeX（KaTeX 渲染）")
+        self.inline_latex = QCheckBox("识别为 LaTeX")
         form.addRow("行内公式", self.inline_latex)
         self.inline_limit = QSpinBox()
         self.inline_limit.setRange(0, 200)
         self.inline_limit.setSpecialValueText("全部")
         self.inline_limit.setSuffix(" 个/篇")
-        self.inline_limit.setToolTip("0 表示不限制；限制可避免首次 OXR 预处理过久。")
         form.addRow("公式上限", self.inline_limit)
 
         self.ocr_timeout = QSpinBox()
@@ -224,25 +198,17 @@ class SettingsDialog(QDialog):
         self.workers.setRange(1, 6)
         self.workers.setSuffix(" 并发")
         form.addRow("翻译并发", self.workers)
-        self.skip_refs = QCheckBox("跳过参考文献条目的翻译")
+        self.skip_refs = QCheckBox("跳过翻译")
         form.addRow("参考文献", self.skip_refs)
-        self.review_pass = QCheckBox("翻译完成后调用 AI 整体审查，去除页眉/页脚等冗余信息")
+        self.review_pass = QCheckBox("用 AI 检查页眉、页脚等冗余内容")
         form.addRow("完成后审查", self.review_pass)
         self.translation_thinking = QComboBox()
         for label, value in REASONING_OPTIONS:
             self.translation_thinking.addItem(label, value)
         self.translation_thinking.setToolTip(
-            "自动：仅对识别到的推理模型发送 reasoning_effort；"
-            "其他模型不发送，避免兼容性问题。强度越高越慢、越贵。"
+            "自动设置仅适用于支持的推理模型。较高的强度可能增加耗时和费用。"
         )
         form.addRow("翻译思考强度", self.translation_thinking)
-        thinking_note = QLabel(
-            "费用提示：翻译默认“自动”，普通模型不产生思考 token；"
-            "使用 o 系列/GPT-5 时默认取“低”，也可设“关闭思考”。"
-        )
-        thinking_note.setObjectName("Muted")
-        thinking_note.setWordWrap(True)
-        form.addRow("", thinking_note)
         layout.addLayout(form)
 
         self.ocr_status = QLabel("")
@@ -267,13 +233,6 @@ class SettingsDialog(QDialog):
             self.color_theme.addItem(label, value)
         form.addRow("颜色主题", self.color_theme)
         layout.addLayout(form)
-        note = QLabel(
-            "深色模式会同步调整界面、译文、表格和问答区。"
-            "“跟随系统”会在 Windows 明暗模式变化时自动切换；保存设置后立即生效。"
-        )
-        note.setObjectName("Muted")
-        note.setWordWrap(True)
-        layout.addWidget(note)
         layout.addStretch(1)
         return page
 
@@ -282,23 +241,18 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(16, 18, 16, 16)
         layout.setSpacing(10)
-        text = QLabel(
-            "<b>EasyPaper 1.0</b><br><br>"
-            "轻量本地论文阅读 / 翻译 / 问答工具。<br>"
-            "Python 3.12 · PySide6 · PyMuPDF · OXR-1.0 · OpenAI 兼容 API。<br><br>"
-            "<b>数据目录</b><br>"
-            f"配置：{CONFIG_PATH}<br>"
-            f"结构化缓存：{CACHE_DIR}\\&lt;PDF 指纹&gt;\\structure.json<br>"
-            f"翻译缓存：{CACHE_DIR}\\&lt;PDF 指纹&gt;\\translation-&lt;签名&gt;.json<br>"
-            f"日志：{LOG_DIR}\\easypaper.log、ocr-worker.log<br>"
-            f"导出：{CONFIG_PATH.parent}\\exports<br><br>"
-            "<b>隐私</b><br>"
-            "PDF 与 OCR 均在本机处理。只有翻译和问答所需的文本片段会发送到你配置的 AI 接口。"
-            "API Key 以明文形式保存在本机 config.json，请勿分享该文件。"
-        )
-        text.setWordWrap(True)
-        text.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(text)
+        form = QFormLayout()
+        for label, path in (("配置", CONFIG_PATH), ("缓存", CACHE_DIR), ("日志", LOG_DIR), ("导出", EXPORT_DIR)):
+            value = QLabel(str(path))
+            value.setTextFormat(Qt.TextFormat.PlainText)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value.setWordWrap(True)
+            form.addRow(label, value)
+        layout.addLayout(form)
+        privacy = QLabel("翻译和问答会向所选 AI 接口发送所需文本。请妥善保管含明文密钥的配置文件。")
+        privacy.setObjectName("Muted")
+        privacy.setWordWrap(True)
+        layout.addWidget(privacy)
         layout.addStretch(1)
         return page
 
@@ -343,12 +297,8 @@ class SettingsDialog(QDialog):
         if not path.is_absolute():
             path = CONFIG_PATH.parent / path
         model_ok = (path / "config.json").is_file() and (path / "model.safetensors").is_file()
-        pieces = []
-        if model_ok:
-            pieces.append("✓ 已找到 config.json / model.safetensors")
-        else:
-            pieces.append("✗ 模型目录不完整（需要 config.json 与 model.safetensors）")
-        self.ocr_status.setText("  ·  ".join(pieces))
+        self.ocr_status.setText("OCR 模型就绪" if model_ok else "缺少 OCR 模型文件")
+        self.ocr_status.setToolTip("需要 config.json 和 model.safetensors")
         self.ocr_status.setStyleSheet("color:#0F766E;" if model_ok else "color:#C2410C;")
 
     # ------------------------------------------------------------------ actions
@@ -413,7 +363,7 @@ class SettingsDialog(QDialog):
         self.test_button.setText("测试中…")
         self.save_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
-        self._set_test_status("正在连接接口并验证鉴权，请稍候…", ok=None)
+        self._set_test_status("连接中…", ok=None)
         self._test_worker = ConnectionTestWorker(config, self)
         self._test_worker.result_ready.connect(self._on_test_result)
         self._test_worker.finished.connect(self._on_test_finished)
@@ -468,7 +418,7 @@ class SettingsDialog(QDialog):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._test_worker is not None and self._test_worker.isRunning():
             self._close_pending = True
-            self.footer_hint.setText("连接测试仍在进行，完成后窗口会自动关闭…")
+            self.footer_hint.setText("连接测试完成后关闭…")
             event.ignore()
             return
         super().closeEvent(event)

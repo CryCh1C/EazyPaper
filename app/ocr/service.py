@@ -19,6 +19,7 @@ from ..config import AppConfig
 from ..logging_setup import get_logger
 from ..models import Block, DocumentStructure
 from ..paths import HOME, find_ocr_python
+import pymupdf
 from .base import OcrPage
 
 log = get_logger("ocr.service")
@@ -103,6 +104,118 @@ class OcrService:
         if not data.get("ok"):
             raise RuntimeError(str(data.get("error") or "OXR worker 失败"))
         return data
+
+    # --------------------------------------------------------------- layout
+    def locate_formulas(self, pdf_path: Path, pages: list[int]) -> dict[int, list[dict]]:
+        """Ask OXR's D-FINE layout model for Formula boxes."""
+        if not pages:
+            return {}
+        data = self._run(
+            {"cmd": "layout", "pdf": str(pdf_path), "pages": [int(p) for p in pages]}
+        )
+        result: dict[int, list[dict]] = {}
+        for number, values in (data.get("formulas") or {}).items():
+            result[int(number)] = [item for item in values if isinstance(item, dict)]
+        return result
+
+    def apply_layout_formulas(
+        self,
+        document: DocumentStructure,
+        pdf_path: Path,
+        formulas: dict[int, list[dict]],
+        asset_dir: Path,
+    ) -> int:
+        """Replace PDF formula heuristics with OXR-located single-line boxes."""
+        if not formulas:
+            return 0
+        pdf = pymupdf.open(str(pdf_path))
+        added = 0
+        try:
+            for page in document.pages:
+                if page.ocr_done:
+                    # Page-level OCR blocks have no individual coordinates to match.
+                    continue
+                boxes = formulas.get(page.number)
+                if not boxes:
+                    # OXR layout may miss a page; retain the existing image
+                    # formula fallback instead of dropping formulas entirely.
+                    continue
+                pdf_page = pdf.load_page(page.number - 1)
+                used_assets = {block.meta.get("asset") for block in page.blocks}
+                asset_number = 0
+                for item in boxes:
+                    bbox = [float(v) for v in item.get("bbox", [])]
+                    if len(bbox) != 4:
+                        continue
+                    if _inside_text_block(page, bbox):
+                        continue
+                    if bbox[2] - bbox[0] < 4 or bbox[3] - bbox[1] < 4:
+                        continue
+                    replaced = [
+                        old
+                        for old in page.blocks
+                        if old.kind == "formula" and old.source != "oxr_layout"
+                        and (_overlaps(old.bbox, bbox) or _overlaps(bbox, old.bbox))
+                    ]
+                    if any(old.source == "oxr_layout" and _overlaps(old.bbox, bbox) for old in page.blocks):
+                        continue
+                    rect = pymupdf.Rect(bbox) + (-2, -2, 2, 2)
+                    for old in replaced:
+                        if old.meta.get("merged_formula") and old.meta.get("asset_bbox"):
+                            rect |= pymupdf.Rect(old.meta["asset_bbox"])
+                    rect &= pdf_page.rect
+                    asset_number += 1
+                    relative = f"assets/p{page.number:03d}_layout_formula{asset_number}.png"
+                    while relative in used_assets:
+                        asset_number += 1
+                        relative = f"assets/p{page.number:03d}_layout_formula{asset_number}.png"
+                    target = asset_dir.parent / relative
+                    try:
+                        if rect.is_empty:
+                            continue
+                        factor = min(3.0, 1800.0 / max(rect.width, rect.height, 1.0))
+                        pix = pdf_page.get_pixmap(
+                            matrix=pymupdf.Matrix(factor, factor),
+                            clip=rect,
+                            alpha=False,
+                            colorspace=pymupdf.csRGB,
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        pix.save(str(target))
+                    except Exception:
+                        continue
+                    display = int(max(180, min(700, rect.width * 1.1)))
+                    text = " ".join(old.text for old in replaced).strip()
+                    if not text:
+                        text = " ".join(pdf_page.get_text("text", clip=rect).split())
+                    block = Block(
+                        id="",
+                        page=page.number,
+                        order=0,
+                        kind="formula",
+                        text=text,
+                        bbox=list(rect),
+                        source="oxr_layout",
+                        meta={
+                            "region_image": True,
+                            "asset": relative,
+                            "asset_width": pix.width,
+                            "asset_height": pix.height,
+                            "display_width": display,
+                            "layout_score": item.get("score", 0),
+                        },
+                    )
+                    replaced_ids = {id(old) for old in replaced}
+                    page.blocks = [old for old in page.blocks if id(old) not in replaced_ids]
+                    page.blocks.append(block)
+                    added += 1
+                if boxes:
+                    page.blocks = _order_blocks(page)
+        finally:
+            pdf.close()
+        if added:
+            document.reindex()
+        return added
 
     # ------------------------------------------------------------- scanned text
     def parse_scanned_pages(
@@ -236,18 +349,19 @@ def _math_runs(spans: list[dict]) -> list[dict]:
         if not text.strip():
             continue
         if span.get("math"):
+            box = list(span.get("bbox") or [])
+            if len(box) != 4:
+                continue
+            if current is not None and (
+                current["line"] != span.get("line") or box[0] - current["bbox"][2] > 2
+            ):
+                runs.append(current)
+                current = None
             if current is None:
-                current = {"text": text, "bbox": list(span.get("bbox") or [])}
+                current = {"text": text, "bbox": box, "line": span.get("line")}
             else:
                 current["text"] += text
-                box = list(span.get("bbox") or [])
-                if len(box) == 4 and len(current["bbox"]) == 4:
-                    current["bbox"] = [
-                        min(current["bbox"][0], box[0]),
-                        min(current["bbox"][1], box[1]),
-                        max(current["bbox"][2], box[2]),
-                        max(current["bbox"][3], box[3]),
-                    ]
+                current["bbox"] = list(pymupdf.Rect(current["bbox"]) | pymupdf.Rect(box))
         else:
             if current is not None:
                 runs.append(current)
@@ -269,3 +383,33 @@ def _math_runs(spans: list[dict]) -> list[dict]:
             continue
         filtered.append(run)
     return filtered
+
+
+def _overlaps(a: list[float], b: list[float]) -> bool:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / area > 0.25
+
+
+def _inside_text_block(page, bbox: list[float]) -> bool:
+    x0, y0, x1, y1 = bbox
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    height = y1 - y0
+    for block in page.blocks:
+        bx0, by0, bx1, by1 = block.bbox
+        if block.kind in {"table", "figure"} and bx0 <= cx <= bx1 and by0 <= cy <= by1:
+            return True
+        if block.kind not in {"paragraph", "heading", "caption", "title"}:
+            continue
+        if not block.text.strip():
+            continue
+        if bx0 <= cx <= bx1 and by0 <= cy <= by1 and height <= 32:
+            return True
+    return False
+
+
+def _order_blocks(page):
+    from ..pdf.extractor import _layout_blocks
+    return _layout_blocks(page.blocks, page.width)
